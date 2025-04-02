@@ -3,6 +3,8 @@
 #Warn ; Enable warnings to assist with detecting common errors
 #NoTrayIcon
 
+cmdAppParam := '"' . A_ScriptDir . '\x' . (A_Is64bitOS?'64':'86') . '\SB-SBL Syntax Converter.exe"'
+
 if (A_Args.Length >= 1) {
     paramsText := ""
     loop A_Args.Length {
@@ -10,8 +12,7 @@ if (A_Args.Length >= 1) {
         paramsText .= ' "' . A_Args[A_Index] . '"'
     }
 
-    exitCode := RunWait('"' . A_ScriptDir . '\x' . (A_Is64bitOS?'64':'86') . '\SB-SBL Syntax Converter.exe"' . paramsText)
-    exitapp exitCode
+    exitapp RunWait(cmdAppParam . paramsText)
 }
-run('"' . A_ScriptDir . '\x' . (A_Is64bitOS?'64':'86') . '\SB-SBL Syntax Converter.exe"')
+run(cmdAppParam)
 exitapp
