@@ -126,7 +126,7 @@ Gui_ControlPanel.AddEdit("X30 Y+10 W330 H125 vConstantsEnumsFilePaths Background
 Gui_ControlPanel.AddEdit("X+10 W330 H125 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
 
 Gui_ControlPanel["Tabs"].UseTab()  ; Add Controls Outside the Tab
-Gui_ControlPanel.AddButton("X290 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan"))
+Gui_ControlPanel.AddButton("X290 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan/SB-SBL_Syntax_Converter/issues"))
 Gui_ControlPanel["VisitIssues"].SetFont("s8")
 
 Gui_ControlPanel.OnEvent("DropFiles", DragAndDropFile)
