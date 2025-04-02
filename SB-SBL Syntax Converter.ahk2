@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 0, Patch: 1 }
+AppVersion := { Major: 1, Minor: 0, Patch: 2 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -449,7 +449,7 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
 
         ; get the list of ini extension names
     scmIniExtensions := Map()
-    loop files workPath . "\" . game . "SCM.*.ini" {
+    loop files workPath . "\" . game . "SCM*.ini" {
         scmIniName := A_LoopFileName
         posL := InStr(scmIniName,".")
         posR := InStr(scmIniName,".", , -1)
@@ -464,7 +464,7 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
         ;
     RegExSCMParser := (ignoreComments?REGEXIGNOREINICOMMENTS:"") . "([[:xdigit:]]{4})[ \t]*=[ \t]*(-?\d+?),(.+)"
     scmCommandsMap := Map()
-    loop files workPath . "\" . game . "SCM.*.ini" {
+    loop files workPath . "\" . game . "SCM*.ini" {
         try fileObj := FileOpen(A_LoopFileFullPath, "r")
         catch {
             warning .= "OpenFileFailed: " A_LoopFileFullPath . "`n"
