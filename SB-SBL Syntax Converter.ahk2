@@ -1,0 +1,977 @@
+/*
+ * @File: SB-SBL Syntax Converter.ahk2
+ * @Author: Aldrin John O. Manalansan (ajom)
+ * @Email: aldrinjohnolaermanalansan@gmail.com
+ * @Brief: Convert Source Codes from Legacy SB Syntax into SBL Syntax
+ * @Last Update: April 2, 2025
+ */
+
+#Requires AutoHotkey v2
+#include %A_MyDocuments%/AutoHotkey/Lib/v2
+#SingleInstance Ignore ; Don't rerun itself
+#Warn ; Enable warnings to assist with detecting common errors
+#NoTrayIcon
+KeyHistory 0 ; no key logging
+ListLines False ; unload line logging
+SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
+
+; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
+
+; #region Constants
+AppVersion := { Major: 1, Minor: 0, Patch: 0 }
+AppName := "AJOM's SB->SBL Syntax Converter"
+Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
+INIPATH := A_ScriptDir . "\" . "Settings.ini"
+
+GUIBACKGROUND := "303841" ; "181818" ; "72787E"
+EDITCTRLBACKGROUND := "1F1F1F" ; "1F1F1F" ; "303841"
+
+RELATIVEPATHSIGN := "\"
+DEFINITIONDELIMITER := "><"
+INIDELIMITER := "|#@$::$@#|"
+eCOMMANDPARSETYPE := {Invalid: 0, Normal: 1, OutputArgument: 2, InputArgument: 3}
+eEXITERRORCODES := {
+    InsufficientParamCount: 1, 
+    InvalidInputSourceCode: 2,
+    InvalidSannyBuilderDirectory: 3,
+    InvalidGame: 4,
+    InvalidOutputSourceCode: 5,
+    ConversionFailed: 6,
+    FailedOverwriteOutputFile: 7,
+    FailedCreateOutputFile: 8
+}
+eWARNINGCODES := Map(
+    "OpenFileFailed", "File is missing or it's locked used by another process",
+    "InvalidOpcode", "Used by Developers to detect problems",
+    "DetectParamsFailed", "Failed to detect all parameters of a command. Can be fixed by specifying the external constants file containing all constants used as a parameter of this command, at this Tool's Settings -> Constants/Enums Files.",
+    "PropMissing", "A command in SBL's json file has a certain property that is missing. Used by Developers to detect problems.",
+    "UnequalParams", "A command in SBL's json file has unequal parameter count. Used by Developers to detect problems.",
+    "OpcodeUntraceable", "SCM opcode is missing in SBL. Used by Developers to detect problems.",
+    "DuplicateDefinitions", "two or more duplicate definitions of the subject was detected. Used by Developers to detect problems."
+)
+
+REGEXBOUNDEDCOMMENT := "{.*?}|\/\*.*?\*\/"
+REGEXALLCOMMENTS := REGEXBOUNDEDCOMMENT . "|\/{2}.*"
+REGEXCOMMENTSANDSPACES := "(?:[ \t]*(?:" . REGEXALLCOMMENTS . "))*[ \t]*"
+REGEXAVOIDBODYCOMMENTS     := "(?:[ \t]*(?:" . REGEXBOUNDEDCOMMENT . "))*"
+;REGEXENDOFWORD := "(?:[ \t]|$)"
+REGEXIGNOREINICOMMENTS := "^[ \t]*[^;#\/]*[ \t]*"
+REGEXPARSEMULTICONST := "i)^const[ \t]+(.*)$"
+REGEXLEFTHANDSIDE := "^(\w+?)[ \t]*="
+REGEXPARSESINGLECONST := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
+REGEXENUMNAME := "i)^enum[ \t]+(.+)$"
+REGEXOPTIONALARRAY := "(?:\[.+?\]|\(.+?,.+?\))?"
+REGEXLVAR := "\d+?@[SsVv]?" ; Local Variable
+REGEXGVAR := "[SsVv]?\$\w+?" ; Global Variable
+REGEXVARARRAY := "^(?:" . REGEXLVAR . "|" . REGEXGVAR . ")" . REGEXOPTIONALARRAY . "$"
+REGEXLITERALS := "^(?:" . "[@#]\w+?" ; Label/Model Name
+         . "|" . "`".*?`"" ; Long String
+         . "|" . "'.*?'" ; Short String  or Ascii Character
+         . "|" . "0[xXbB][[:xdigit:]]+?" ; Hexadecimal/Binary Integer
+         . "|" . "[+-]?(?:\d*?\.\d+?|\d+)(?:e[+-]?\d+)?" . ")$" ; decimal integer/float with/without exponential notation
+; #endregion Constants
+
+gSettings := LoadSettings()
+
+if (A_Args.Length >= 2) { ; User is interacting to this script via CMD
+    /*
+        A_Args[1] = Input Source Code
+        A_Args[2] = Sanny Builder Directory
+        A_Args[3] = Target Game
+        A_Args[4] = UseClass (Optional Parameter)
+        A_Args[5] = Output Source Code (Optional Parameter)
+    */
+
+    if (A_Args.Length < 3) { ; 3 params minimum
+        ExitApp eEXITERRORCODES.InsufficientParamCount
+    }
+    
+    loop A_Args.Length {
+        A_Args[A_Index] := StrReplace(A_Args[A_Index], '"') ; replace all quotation marks
+    }
+
+    CLIProcessSourceCode(A_Args*)
+}
+
+; #region ~~~~~~~~~~~~~~~~~~~~~~~~~~~ Construct the Control Panel GUI
+Gui_ControlPanel := Gui("Resize OwnDialogs Disabled", Gui_ControlPanel_DefaultTitle)
+Gui_ControlPanel.BackColor := GUIBACKGROUND
+Gui_ControlPanel.SetFont("cWhite s10", "Consolas")
+Gui_ControlPanel.AddTab3("vTabs", ["Main", "Settings"]).SetFont("bold")
+
+Gui_ControlPanel["Tabs"].UseTab(1)  ; Add Controls at the Main Tab
+Gui_ControlPanel.AddText("X30 Y50", "Game:")
+Gui_ControlPanel.AddDDL("X+2 H20 W50 vGame R" . gSettings.Games.Length . " Choose" . gSettings.Game, gSettings.Games).OnEvent("Change", GameChanged)
+Gui_ControlPanel.AddCheckBox("X+m H20 vUseClass Checked" . gSettings.UseClass, "Use Class").OnEvent("Click", SaveGeneralSettingToIni)
+Gui_ControlPanel.AddButton("X+m H20", "Save Converted Source Code").OnEvent("Click", SaveConvertedText)
+Gui_ControlPanel.AddButton("X30 Y+10 H20", "Browse Source Code").OnEvent("Click", BrowseSourceCode)
+Gui_ControlPanel.AddEdit("X+m W250 H20 vTargetPath ReadOnly Background" . EDITCTRLBACKGROUND)
+Gui_ControlPanel.AddEdit("X30 Y+10 W670 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND)
+Gui_ControlPanel.AddEdit("X450 Y35 W250 H73 vWarnings ReadOnly Background" . EDITCTRLBACKGROUND).SetFont("s8")
+
+Gui_ControlPanel["Tabs"].UseTab(2)  ; Add Controls at the Settings Tab
+Gui_ControlPanel.AddButton("X30 Y50 H20", "Browse Sanny Builder").OnEvent("Click", BrowseSannyBuilder)
+Gui_ControlPanel.AddEdit("X+m W500 H20 vSBDir ReadOnly Background" . EDITCTRLBACKGROUND, gSettings.SBDir)
+Gui_ControlPanel.AddText("X30 Y+20", "Configure Definitions Files for").SetFont("s9")
+Gui_ControlPanel.AddDDL("X+2 W50 H1 vConfigurationGameType R" . gSettings.Games.Length . " Choose" . gSettings.Game, gSettings.Games).OnEvent("Change", ReloadDefinitions)
+Gui_ControlPanel.SetFont("s9")
+Gui_ControlPanel.AddText("X+2", 'Separate each definitions by a single newline.')
+Gui_ControlPanel.AddText("X30 Y+10", 'Specify the full path to file or add backslash "\" at the beginning for Relative Path to SB\data\<game>')
+Gui_ControlPanel.AddText("X30 Y+3", 'Put "><" sign at the beginning of comments')
+Gui_ControlPanel.SetFont("s10 bold")
+Gui_ControlPanel.AddText("X100 Y+10 vConstEnumText_x", "Constants/Enums Files")
+Gui_ControlPanel.AddText("X+220 vKeywordsText_x", "Keywords Files")
+Gui_ControlPanel.SetFont("norm")
+Gui_ControlPanel.AddEdit("X30 Y+10 W330 H125 vConstantsEnumsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+Gui_ControlPanel.AddEdit("X+10 W330 H125 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+
+Gui_ControlPanel["Tabs"].UseTab()  ; Add Controls Outside the Tab
+Gui_ControlPanel.AddButton("X290 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan"))
+Gui_ControlPanel["VisitIssues"].SetFont("s8")
+
+Gui_ControlPanel.OnEvent("DropFiles", DragAndDropFile)
+Gui_ControlPanel.OnEvent("Size",Gui_ControlPanel_Resize)
+Gui_ControlPanel.OnEvent("Close",Gui_ControlPanel_Closed)
+Gui_ControlPanel.Show("Center")
+sleep 500
+Gui_ControlPanel.Maximize()
+Gui_ControlPanel.Opt("-Disabled")
+; #endregion
+
+if (A_Args.Length == 1) { ; a file has been dragged onto this script before runtine
+    PreloadConvertedText(A_Args[1])
+}
+
+; #endregion ~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
+
+Return
+
+; #region ~~~~~~~~~~~~~~~~~~~~~~~ HOTKEYS ~~~~~~~~~~~~~~~~~~~~
+
+
+; #endregion ~~~~~~~~~~~~~~~~~~~~ HOTKEYS ~~~~~~~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~~~~~~ HOTSTRINGS ~~~~~~~~~~~~~~~~~~~
+
+
+; #endregion ~~~~~~~~~~~~~~~~~~ HOTSTRINGS ~~~~~~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~~~~~~~~ TIMERS ~~~~~~~~~~~~~~~~~~~~~
+
+
+; #endregion ~~~~~~~~~~~~~~~~~~~~ TIMERS ~~~~~~~~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~~~~ Events Handlers ~~~~~~~~~~~~~~~~
+BrowseSannyBuilder(*)
+{
+	Gui_ControlPanel.Opt("+OwnDialogs")
+    SelectSBDir:
+    if !(selected := DirSelect(, , "Navigate to Sanny Builder Root Folder")) {
+        return
+    }
+    if !ValidateSBDir(selected) {
+        if (MsgBox("Cannot Find the data configuration directories`n`nWould you like to select a folder again?", "Invalid Sanny Builder Directory", 36) == "Yes") {
+            goto SelectSBDir
+        }
+        return
+    }
+    Gui_ControlPanel["SBDir"].Value := selected
+    IniWrite(selected, INIPATH, "General", "SBDir")
+}
+
+SaveConvertedText(*) {
+	Gui_ControlPanel.Opt("+OwnDialogs")
+    if (Gui_ControlPanel["ConvertedText"].Value == "")
+    or !(selected := FileSelect("S18", , "Select File", "Text (*.txt)")) {
+        return
+    }
+    SplitPath(selected,&name)
+    if !InStr(name, ".") {
+        selected .= ".txt"
+    }
+    if FileExist(selected) {
+        FileDelete(selected)
+    }
+    FileAppend(Gui_ControlPanel["ConvertedText"].Value, selected)
+    msgbox "Converted Source Code has been saved at:`n" . selected
+}
+
+GameChanged(*) {
+    IniWrite(Gui_ControlPanel["Game"].Value, INIPATH, "General", Gui_ControlPanel["Game"].Name)
+    Gui_ControlPanel["ConfigurationGameType"].Value := Gui_ControlPanel["Game"].Value
+    ReloadDefinitions()
+}
+
+SaveGeneralSettingToIni(GuiCtrlObj, Info) {
+    IniWrite(GuiCtrlObj.Value, INIPATH, "General", GuiCtrlObj.Name)
+}
+
+SaveDefinitionSettingToIni(GuiCtrlObj, Info := "") {
+    ; remove leading and trailing whitespaces then reformat into an ini compatible string (no newlines)
+    gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text] := Trim(StrReplace(GuiCtrlObj.Value, "/", "\"), " `t`n")
+    IniWrite(
+        StrReplace(gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text], "`n", INIDELIMITER),
+        INIPATH,
+        Gui_ControlPanel["ConfigurationGameType"].Text,
+        GuiCtrlObj.Name
+    )
+}
+
+ReloadDefinitions(*) {
+    Gui_ControlPanel["ConstantsEnumsFilePaths"].Value := gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]
+    Gui_ControlPanel["KeywordsFilePaths"].Value := gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]
+}
+
+BrowseSourceCode(*) {
+	Gui_ControlPanel.Opt("+OwnDialogs")
+    if selected := FileSelect("3", , "Select Source Code to Convert") {
+        GUIProcessSourceCode(selected)
+    }
+}
+
+DragAndDropFile(GuiObj, GuiCtrlObj, FileArray, X, Y)
+{
+    if (GuiCtrlObj != Gui_ControlPanel["ConvertedText"]) {
+        return
+    }
+    if Gui_ControlPanel["ConvertedText"].Value
+    and (MsgBox("Converting source code:`n" . FileArray[1] . "`n`nThe converted source code field will be updated. Continue?", "Confirmation", 36) == "No") {
+        return
+    }
+    GUIProcessSourceCode(FileArray[1])
+}
+
+Gui_ControlPanel_Resize(GuiObj, MinMax, Width, Height) {
+	If (MinMax = -1) ; The window has been minimized.
+		Return
+	AutoXYWH("wh", Gui_ControlPanel["Tabs"])
+	AutoXYWH("w", Gui_ControlPanel["SBDir"])
+	AutoXYWH("w0.5", Gui_ControlPanel["TargetPath"])
+	AutoXYWH("x0.5 w0.5", Gui_ControlPanel["Warnings"])
+	AutoXYWH("wh", Gui_ControlPanel["ConvertedText"])
+	AutoXYWH("x0.25", Gui_ControlPanel["ConstEnumText_x"])
+	AutoXYWH("x0.75", Gui_ControlPanel["KeywordsText_x"])
+    AutoXYWH("w0.5 h", Gui_ControlPanel["ConstantsEnumsFilePaths"])
+    AutoXYWH("x0.5 w0.5 h", Gui_ControlPanel["KeywordsFilePaths"])
+    AutoXYWH("x0.5", Gui_ControlPanel["VisitIssues"])
+}
+
+Gui_ControlPanel_Closed(*) {
+    for , v in ["ConstantsEnumsFilePaths", "KeywordsFilePaths"] {
+        SaveDefinitionSettingToIni(Gui_ControlPanel[v])
+    }
+}
+; #endregion ~~~~~~~~~~~~~~~~ Events Handlers ~~~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~ SNIPPETS / FUNCTIONS ~~~~~~~~~~~~~~
+PreloadConvertedText(sourceCodePath) {
+    checker := FileExist(sourceCodePath)
+    if checker and !InStr(checker, "D") { ; file exist or is not a folder
+        GUIProcessSourceCode(sourceCodePath)
+    }
+}
+
+GUIProcessSourceCode(sourceCodePath) {
+	Gui_ControlPanel.Opt("+OwnDialogs")
+    if !ValidateSBDir(Gui_ControlPanel["SBDir"].Value) {
+        Gui_ControlPanel["Tabs"].Choose(2) ; go to settings panel
+        MsgBox("Please browse Sanny Builder Root Directory first", "Invalid Sanny Builder Directory", 16)
+        return
+    }
+    Gui_ControlPanel.Opt("+Disabled")
+    Gui_ControlPanel["TargetPath"].Value := sourceCodePath
+    Gui_ControlPanel["Warnings"].Value := ""
+    Gui_ControlPanel["ConvertedText"].Value := ""
+    InitializeVariables(Gui_ControlPanel["SBDir"].Value, Gui_ControlPanel["Game"].Text)
+    Gui_ControlPanel["ConvertedText"].Value := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, Gui_ControlPanel["UseClass"].Value)
+    Gui_ControlPanel.Opt("-Disabled")
+}
+
+CLIProcessSourceCode(inputSourceCode, sannyBuilderDirectory, targetGame, useClass := "", outputSourceCode := "", unused*) {
+
+    checker := FileExist(inputSourceCode)
+    if !checker or InStr(checker, "D") { ; file does not exist or is a folder
+        ExitApp eEXITERRORCODES.InvalidInputSourceCode
+    }
+
+        ; remove trailing slash/backslash
+    checker := SubStr(sannyBuilderDirectory, -1, 1) ; get last character
+    if (checker == "\") or (checker == "/") {
+        sannyBuilderDirectory := SubStr(sannyBuilderDirectory, 1, -1) ; remove the last character
+    }
+        ;
+    checker := FileExist(sannyBuilderDirectory . "\")
+    if !checker or !InStr(checker, "D") or !ValidateSBDir(sannyBuilderDirectory) { ; folder is invalid
+        ExitApp eEXITERRORCODES.InvalidSannyBuilderDirectory
+    }
+    
+        ; check if the specified game has SBL data
+    checker := true
+    for , folderName in gSettings.Games {
+        if (targetGame != folderName) {
+            continue
+        }
+        dataDir := sannyBuilderDirectory . "\data\" . folderName
+        if FileExist(dataDir . "\") and FileExist(dataDir . "_sbl\") {
+            checker := false
+            break
+        }
+    }
+    if checker {
+        ExitApp eEXITERRORCODES.InvalidGame
+    }
+        ;
+    if !outputSourceCode or (inputSourceCode == outputSourceCode) { ; output source code has been specified
+        ; construct a unique output path that doesn't exist yet
+        SplitPath(inputSourceCode, , &dir, &ext, &name)
+        outputSourceCode := dir . "\" . name . "_SBL." . ext
+        while FileExist(outputSourceCode) {
+            outputSourceCode := dir . "\" . name . "_SBL" . A_Index . "." . ext
+        }
+    }
+    
+    useClass := (useClass == "") ? gSettings.UseClass : useClass ? true : false
+
+    InitializeVariables(sannyBuilderDirectory, targetGame)
+    convertedText := ConvertSBToSBL(inputSourceCode, targetGame, useClass)
+    if (convertedText == "") {
+        ExitApp eEXITERRORCODES.ConversionFailed
+    } else {
+        if FileExist(outputSourceCode) {
+            try FileDelete(outputSourceCode)
+            catch {
+                ExitApp eEXITERRORCODES.FailedOverwriteOutputFile
+            }
+        }
+        if !FileExist(outputSourceCode) {
+            try FileAppend(convertedText, outputSourceCode)
+            catch {
+                ExitApp eEXITERRORCODES.FailedCreateOutputFile
+            }
+        }
+    }
+
+    ExitApp ; successful exit
+}
+
+ValidateSBDir(sbDir) {
+    for , folderName in gSettings.Games {
+        dataDir := sbDir . "\data\" . folderName
+        if !FileExist(dataDir . "\") or !FileExist(dataDir . "_sbl\" . folderName . ".json") {
+            return false
+        }
+    }
+    return true
+}
+
+LoadSettings() {
+    if (!FileExist(INIPATH)) {
+        FileAppend("", INIPATH)
+        isNewIni := true
+    } else {
+        isNewIni := false
+    }
+
+    settings := Object()
+
+        ; Load all General Settings
+    for , el in [
+        ["Games", "gta3|sa|vc"],
+        ["Game", "2"],
+        ["UseClass", "1"],
+        ["SBDir", ""] ] {
+        settings.%el[1]% := IniRead(INIPATH, "General", el[1], "")
+        if (settings.%el[1]% == "") and (el[2] != "") { ; key is undefined
+            settings.%el[1]% := el[2]
+            IniWrite(el[2], INIPATH, "General", el[1])
+        }
+    }
+    settings.Games := StrSplit(settings.Games, "|", " `t")
+        ;
+
+        ; Load all Constants/Enums/Keywords FilePaths
+    for , el in ["ConstantsEnumsFilePaths", "KeywordsFilePaths"] {
+        settings.%el% := Map()
+        for , game in settings.Games {
+            if !isNewIni  {
+                settings.%el%[game] := IniRead(INIPATH, game, el, "")
+            } else if (game = "sa") and (el == "ConstantsEnumsFilePaths") {
+                ; add SAMPFUNCS constants if ini is new
+                settings.%el%[game] := RELATIVEPATHSIGN . "SF " . DEFINITIONDELIMITER . " Extensionless file containing all SAMPFUNCS Legacy Constants manually added at <SBDir>\data\<game>\"
+                IniWrite(settings.%el%[game], INIPATH, game, el)
+            } else {
+                settings.%el%[game] := ""
+            }
+            settings.%el%[game] := Trim(StrReplace(settings.%el%[game], INIDELIMITER, "`n"), " `t`n")
+        }
+    }
+        ;
+
+    return settings
+}
+
+InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, ignoreComments := true) {
+    global scmCommandsMap, sblCommandsMap, predefConsts, predefKeywords, sblVersion
+
+    warning := ""
+    workPath := sannyBuilderDir . "\data\" . game
+
+    sblCommandsMap := Map()
+    json := FileRead(workPath . "_sbl\" . game . ".json")
+    json := Jxon_load(&json)
+    sblVersion := (json.Has("meta") and json["meta"].Has("version")) ? json["meta"]["version"] : "Unknown"
+    For extension in json["extensions"] {
+        if !extension.Has("name") or !extension.Has("commands") {
+            continue
+        }
+        extensionName := StrLower(extension["name"])
+        sblCommandsMap[extensionName] := Map()
+        For command in extension["commands"] {
+            opcode := ("0x" . command["id"]) + 0 ; convert hex string to number
+            if (opcode == "") { ; failed parsing opcode
+                warning .= "InvalidOpcode: sa.json/" . extension["name"] . "/" . (command.Has("name")?command["name"]:"<UNKNOWN>") . "`n"
+                continue
+            }
+
+            if sblCommandsMap[extensionName].Has(opcode) {
+                warning .= "DuplicateDefinitions: Command -> sa.json/" . extension["name"] . "/" . Format("{:04X}", opcode) . " -> (" . sblCommandsMap[extension["name"]][opcode]["name"] . " | " . command["name"] . ")`n"
+            }
+
+            if !command.Has("num_params") {
+                warning .= "PropMissing: num_params -> sa.json/" . extension["name"] . "/" . Format("{:04X}", opcode) . "`n"
+            } else if (command["num_params"] != ((command.Has("input")?command["input"].Length:0) + (command.Has("output")?command["output"].Length:0))) {
+                warning .= "UnequalParams: num_params != num_outputs + num_inputs -> sa.json/" . extension["name"] . "/" . Format("{:04X}", opcode) . "`n"
+            }
+
+            sblCommandsMap[extensionName][opcode] := command
+        }
+    }
+
+        ; get the list of ini extension names
+    scmIniExtensions := Map()
+    loop files workPath . "\SASCM.*" {
+        scmIniName := A_LoopFileName
+        posL := InStr(scmIniName,".")
+        posR := InStr(scmIniName,".", , -1)
+        if (posL == posR) {
+            extensionName := "default"
+        } else {
+            posL++
+            extensionName := StrLower(SubStr(scmIniName, posL, posR-posL))
+        }
+        scmIniExtensions[extensionName] := true
+    }
+        ;
+    RegExSCMParser := (ignoreComments?REGEXIGNOREINICOMMENTS:"") . "([[:xdigit:]]{4})[ \t]*=[ \t]*(-?\d+?),(.+)"
+    scmCommandsMap := Map()
+    loop files workPath . "\SASCM.*" {
+        try fileObj := FileOpen(A_LoopFileFullPath, "r")
+        catch {
+            warning .= "OpenFileFailed: " A_LoopFileFullPath . "`n"
+            continue
+        }
+        scmIniName := A_LoopFileName
+        posL := InStr(scmIniName,".")
+        posR := InStr(scmIniName,".", , -1)
+        if (posL == posR) {
+            loopExtensionName := "default"
+        } else {
+            posL++
+            loopExtensionName := StrLower(SubStr(scmIniName, posL, posR-posL))
+        }
+        while !fileObj.AtEOF {
+            textLine := fileObj.ReadLine()
+            if !RegExMatch(textLine, RegExSCMParser, &matchedText) {
+                continue
+            }
+            opcode := ("0x" . matchedText[1]) + 0 ; convert hex string to number
+            if (opcode == "") { ; failed parsing opcode
+                warning .= "InvalidOpcode: " . scmIniName . ":" . textLine "`n"
+                continue
+            }
+                ; organize the opcodes of each extensions in scm to be like sbl extension. Example:
+                ; * bitwise opcodes are in default extensions in scm, but in sbl it is a separate extension
+                ; * ini, file opcodes are in cleo extensions in scm, but in sbl they are a separate extension
+            extensionName := ""
+            if sblCommandsMap.Has(loopExtensionName) and sblCommandsMap[loopExtensionName].Has(opcode) {
+                extensionName := loopExtensionName
+            } else for sblExtensionName in sblCommandsMap {
+                if !scmIniExtensions.Has(sblExtensionName) and sblCommandsMap[sblExtensionName].Has(opcode) {
+                    ; scm doesn't have an ini extension name with this sbl extension name that has the opcode.
+                    extensionName := sblExtensionName
+                    break
+                }
+            }
+            if (extensionName == "") {
+                warning .= "OpcodeUntraceable: " loopExtensionName "/" Format("{:04X}", opcode) "`n"
+                continue
+            }
+                ;
+            if !scmCommandsMap.Has(extensionName) {
+                scmCommandsMap[extensionName] := Map()
+            }
+            scmCommandsMap[extensionName][opcode] := {ParamCount: matchedText[2], ParamOrder: Map()}
+            posL := 1
+            while RegExMatch(matchedText[3], "%(\d+)", &orderMatch, posL) {
+                posL := orderMatch.Pos(1) + orderMatch.Len(1)
+                scmCommandsMap[extensionName][opcode].ParamOrder[orderMatch[1] + 0] := scmCommandsMap[extensionName][opcode].ParamOrder.Count + 1
+            }
+        }
+    }
+
+    predefConsts := Map()
+        ; constants which doesn't require {$include}
+    for , filePath in [RELATIVEPATHSIGN . "constants.txt", RELATIVEPATHSIGN . "enums.txt"] {
+        warning .= UpdatePredefConsts(&predefConsts, filePath, workPath, false)
+    }
+        ; constants which requires {$include}
+    if gSettings.ConstantsEnumsFilePaths[game] {
+        Loop Parse gSettings.ConstantsEnumsFilePaths[game], "`n", " `t" {
+            warning .= UpdatePredefConsts(&predefConsts, A_LoopField, workPath, true)
+        }
+    }
+    
+    predefKeywords := Map()
+    parsedText := RELATIVEPATHSIGN . "keywords.txt"
+    if gSettings.KeywordsFilePaths[game] {
+        parsedText .= "`n" . gSettings.KeywordsFilePaths[game]
+    }
+    Loop Parse parsedText, "`n", " `t" {
+        filePath := ((SubStr(A_LoopField, 1, 1) == RELATIVEPATHSIGN) ? workPath : "") . A_LoopField
+            ; Remove Comments
+        posL := InStr(filePath, DEFINITIONDELIMITER)
+        if posL {
+            filePath := SubStr(filePath, 1, posL-1)
+        }
+            ;
+        filePath := Trim(filePath) ; remove trailing and leading whitespaces
+
+        try fileObj := FileOpen(filePath, "r")
+        catch {
+            warning .= "OpenFileFailed: keywords -> " . filePath . "`n"
+            continue
+        }
+        while !fileObj.AtEOF {
+            textLine := fileObj.ReadLine()
+            if RegExMatch(textLine, REGEXIGNOREINICOMMENTS . "([[:xdigit:]]{4})[ \t]*=[ \t]*(.+)", &matchedText) {
+                keyword := StrLower(matchedText[2])
+                if !ignoreDuplicateKeywords and predefKeywords.Has(keyword) {
+                    warning .= "DuplicateDefinitions: keywords.txt/" . keyword . " -> (" . Format("{:04X}", predefKeywords[keyword]) . " | " . matchedText[1] . ")`n"
+                }
+                predefKeywords[keyword] := ("0x" . matchedText[1]) + 0 ; add keyword to our list of known keywords
+            }
+        }
+    }
+
+    if IsSet(Gui_ControlPanel) {
+        ShowWarnings(warning)
+    }
+}
+
+ShowWarnings(warnings) {
+    legend := ""
+    for key in eWARNINGCODES {
+        if InStr(warnings, key) {
+            legend .= "`n" . key ": " . eWARNINGCODES[key]
+        }
+    }
+    if legend {
+        warnings .= "`n`n~~~Warning Descriptions~~~" . legend . "`n`nCheck this tool's Github Issue page for possible fixes."
+    }
+    Gui_ControlPanel["Warnings"].Value := warnings
+}
+
+GetCommandParseType(usedExtensions, opcode, params, &command) {
+    if (opcode >= 0x8000) {
+        isLogicNot := true
+        opcode &= 0x7FFF ; flip the not bit
+    } else {
+        isLogicNot := false
+    }
+    for extension in usedExtensions {
+        if !scmCommandsMap.Has(extension) or !scmCommandsMap[extension].Has(opcode)
+        or !sblCommandsMap.Has(extension) or !sblCommandsMap[extension].Has(opcode) or !sblCommandsMap[extension][opcode].Has("num_params") {
+            continue
+        }
+        if sblCommandsMap[extension][opcode].Has("output")
+        and (sblCommandsMap[extension][opcode]["output"][sblCommandsMap[extension][opcode]["output"].Length]["type"] == "arguments") {
+            command := {ParseType: eCOMMANDPARSETYPE.OutputArgument, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
+            return eCOMMANDPARSETYPE.OutputArgument
+        } else if sblCommandsMap[extension][opcode].Has("input")
+        and (sblCommandsMap[extension][opcode]["input"][sblCommandsMap[extension][opcode]["input"].Length]["type"] == "arguments") {
+            command := {ParseType: eCOMMANDPARSETYPE.InputArgument, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
+            return eCOMMANDPARSETYPE.InputArgument
+        } else if (params.Length == sblCommandsMap[extension][opcode]["num_params"]) {
+            command := {ParseType: eCOMMANDPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
+            return eCOMMANDPARSETYPE.Normal
+        }
+    }
+    return eCOMMANDPARSETYPE.Invalid
+}
+
+UpdateEnums(name, field, &constantMap, groupKey := "") {
+    if RegExMatch(field, REGEXLEFTHANDSIDE, &matchedText) {
+        field := matchedText[1]
+    }
+    name := StrLower(name) . "." . StrLower(field)
+    if groupKey { ; store in a constant group
+        constantMap[StrLower(groupKey)][name] := true ; constant's value is literal
+    } else { ; store in a constant list
+        constantMap[name] := true ; constant's value is literal
+    }
+}
+
+UpdateConstants(value, &constantMap, groupKey := "") {
+    For value in StrSplit(value, ",", " `t") {
+        if !RegExMatch(value, REGEXPARSESINGLECONST, &value) {
+            continue
+        }
+        leftHandSide := StrLower(value[1])
+        rightHandSide := StrLower(value[2])
+        ; add constant to our list of known constants
+        ; value = 0 = variable
+        ; value = 1 = literal
+        if groupKey { ; store in a constant group
+            constantMap[groupKey][leftHandSide] := !RegExMatch(rightHandSide, REGEXVARARRAY)
+        } else { ; store in a constant list
+            if RegExMatch(rightHandSide, REGEXVARARRAY) {
+                constantMap[leftHandSide] := false ; constant's value is a variable
+                return
+            } else for constant in constantMap {
+                if (rightHandSide = constant) { ; constant's value is equal to another constant's value (case insensitive)
+                    constantMap[leftHandSide] := constantMap[constant]
+                    return
+                }
+            }
+            constantMap[leftHandSide] := true ; constant's value is literal
+        }
+    }
+}
+
+UpdatePredefConsts(&predefConsts, filePath, workPath, requiresInclude := false) {
+        ; Remove Comments
+    posL := InStr(filePath, DEFINITIONDELIMITER)
+    if posL {
+        filePath := SubStr(filePath, 1, posL-1)
+    }
+        ;
+    filePath := StrLower(filePath)
+    workPath := StrLower(workPath)
+    isRelativePath := (SubStr(filePath, 1, 1) == RELATIVEPATHSIGN)
+    groupKey := Trim(!requiresInclude ? DEFINITIONDELIMITER : isRelativePath ? SubStr(filePath, 2) : filePath) ; remove trailing and leading whitespaces
+    filePath := Trim((isRelativePath ? workPath : "") . filePath) ; remove trailing and leading whitespaces
+
+    try fileObj := FileOpen(filePath, "r")
+    catch {
+        return "Can't open constants/enums file: " . filePath . "`n"
+    }
+
+    if !predefConsts.Has(groupKey) { ; this group is new from our list of constants groups
+        predefConsts[groupKey] := Map()
+    }
+
+    parseMode := 0
+    while !fileObj.AtEOF {
+        textLine := Trim(RegExReplace(fileObj.ReadLine(), REGEXALLCOMMENTS)) ; remove all comments then remove leading and trailing whitespaces
+        if (textLine == "") {
+            continue
+        } else if parseMode and (textLine = "end") {
+            parseMode := 0 ; switch to parse command mode
+            continue
+        }
+        switch (parseMode) {
+        Case 1: ; Const ... End
+            UpdateConstants(textLine, &predefConsts, groupKey)
+        Case 2: ; Enum ... End
+            UpdateEnums(enumName, textLine, &predefConsts, groupKey)
+        Default: ; Command
+            if (textLine = "const") {
+                parseMode := 1 ; switch to parse const mode
+            } else if RegExMatch(textLine, REGEXENUMNAME, &matchedText) {
+                parseMode := 2 ; switch to parse enum mode
+                enumName := matchedText[1]
+            } else if RegExMatch(textLine, REGEXPARSEMULTICONST, &matchedText) {
+                UpdateConstants(matchedText[1], &predefConsts, groupKey)
+            }
+        }
+    }
+
+    return ""
+}
+
+ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
+
+    try fileReader := FileOpen(inputFile, "r")
+    catch {
+        return ""
+    }
+
+    lineCount := 0
+    convertedText := ""
+    warning := ""
+    REGEXCOMMANDSTARTINGBARRIER := "^(?:[ \t]*(?:if|then|else|while|until|" . REGEXALLCOMMENTS . "))*[ \t]*"
+    
+    usedExtensions := Map()
+    constantMap := Map()
+    for key in predefConsts[DEFINITIONDELIMITER] { ; add preloaded constants to our list of known constants
+        constantMap[key] := predefConsts[DEFINITIONDELIMITER][key]
+    }
+
+    parseMode := 0
+    while !fileReader.AtEOF {
+        textLine := fileReader.ReadLine()
+        fromText := RegExReplace(textLine, "\/{2}.*") ; remove // comments
+        if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
+            usedExtensions["default"] := true
+            usedExtensions["cleo"] := true
+        } else if RegExMatch(fromText, "i){[\t ]*\$(USE|I(?:NCLUDE(?:_ONCE)*)*)[\t ]+(.+?)[\t ]*}", &matchedText) { ; encountered $USE directive
+            For key in StrSplit(matchedText[2], ",", " `t") {
+                key := StrLower(key)
+                if (matchedText[1] = "USE") { ; case insensistive
+                    if scmCommandsMap.Has(key) and sblCommandsMap.Has(key) {
+                        usedExtensions[key] := true
+                    }
+                } else if predefConsts.Has(key) { ; process includes
+                    for field in predefConsts[key] { ; add all the constants of this included file to our list of known constants
+                        constantMap[field] := predefConsts[key][field]
+                    }
+                }
+            }
+        } else if RegExMatch(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER . "(.+?)" . REGEXCOMMENTSANDSPACES . "$", &fromText) {
+            ; textLine is suspected as a command (case insensitive)
+            fromText := Trim(fromText[1])
+            processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
+
+            switch (parseMode) {
+            Case 1: ; Const ... End
+                if (processedText = "end") {
+                    parseMode := 0 ; switch to parse command mode
+                } else {
+                    UpdateConstants(processedText, &constantMap)
+                }
+            Case 2: ; Enum ... End
+                if (processedText = "end") {
+                    parseMode := 0 ; switch to parse command mode
+                } else {
+                    UpdateEnums(enumName, processedText, &constantMap)
+                }
+            Case 3: ; Var ... End , Hex ... End
+                if (processedText = "end") {
+                    parseMode := 0 ; switch to parse command mode
+                }
+            Default: ; Command
+                if (processedText = "const") {
+                    parseMode := 1 ; switch to parse const mode
+                } else if RegExMatch(processedText, REGEXENUMNAME, &matchedText) {
+                    parseMode := 2 ; switch to parse enum mode
+                    enumName := matchedText[1]
+                } else if (processedText = "var") or (processedText = "hex") {
+                    parseMode := 3 ; switch to parse var mode
+                } else if RegExMatch(processedText, REGEXPARSEMULTICONST, &matchedText) {
+                    UpdateConstants(matchedText[1], &constantMap)
+                } else {
+                    ; create array of params found at processedText
+                    paramOrder := Array()
+                    pos := 1
+                    while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
+                        pos := matchedText.Pos(1) + matchedText.Len(1) ; update regex startinig position
+                        term := matchedText[1]
+                        if (SubStr(term, matchedText.Len(1)) == ":") {
+                            continue ; do nothing if its an opcode
+                        } else if RegExMatch(term, REGEXVARARRAY) {
+                            paramOrder.Push({Value: term, IsLiteral: false}) ; add var to list of params
+                        } else if RegExMatch(term, REGEXLITERALS) {
+                            paramOrder.Push({Value: term, IsLiteral: true}) ; add literal to list of params
+                        } else For key in constantMap {
+                            if RegExMatch(term, "i)(" . key . ")" . REGEXOPTIONALARRAY, &matchedText) { ; term is a constant (case insensitive)
+                                paramOrder.Push({Value: matchedText[1], IsLiteral: constantMap[key]})
+                                break
+                            }
+                        }
+                    }
+    
+                    command := ""
+                    if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
+                        checkOpcode := ("0x" . matchedText[1]) + 0
+                        if (GetCommandParseType(usedExtensions, checkOpcode, paramOrder, &command) == eCOMMANDPARSETYPE.Invalid) {
+                            warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                        }
+                    } else for key in predefKeywords {
+                        if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
+                            if (GetCommandParseType(usedExtensions, predefKeywords[key], paramOrder, &command) != eCOMMANDPARSETYPE.Invalid) {
+                                break
+                            } else {
+                                warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                            }
+                        }
+                    }
+                    if IsObject(command) and (command.ParseType != eCOMMANDPARSETYPE.Invalid) {
+                            ; scm command to sbl command
+                        if command.SBL.Has("operator") {
+                                ; declare var type for each params
+                            index := 0
+                            processedText := ""
+                            For key in ["input", "output"] {
+                                if !command.SBL.Has(key) or (command.SBL[key].Length <= 0) {
+                                    continue
+                                }
+                                For , key in command.SBL[key] {
+                                    index++
+                                    if !key.Has("type") or paramOrder[command.SCM.ParamOrder[index]].IsLiteral
+                                    or RegExMatch(paramOrder[command.SCM.ParamOrder[index]].Value, "[SsVv]$|@[SsVv]") {
+                                        continue
+                                    }
+                                    processedText .= paramOrder[command.SCM.ParamOrder[index]].Value . ":" . key["type"] . ", "
+                                }
+                            }
+                            if (processedText != "") {
+                                if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
+                                    ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
+                                    tmpr := matchedText[1] . matchedText[2]
+                                    textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
+                                    convertedText .= tmpr . "`r`n"
+                                    lineCount++
+                                    processedText := matchedText[1] . "`tvar " . Trim(processedText,", `t")
+                                } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
+                                    processedText := matchedText[1] . "var " . Trim(processedText,", `t")
+                                } else {
+                                    processedText := "var " . Trim(processedText,", `t")
+                                }
+                                convertedText .= processedText . "`r`n"
+                                lineCount++
+                                processedText := ""
+                            }
+                                ;
+                            switch (command.SBL["num_params"]) {
+                                case 1:
+                                    processedText := command.SBL["operator"] . paramOrder[1].Value
+                                case 2:
+                                    if (command.SBL.Has("output") and (command.SBL["output"].Length == 1)) {
+                                        processedText := paramOrder[command.SCM.ParamOrder[2]].Value
+                                                       . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
+                                                       . paramOrder[command.SCM.ParamOrder[1]].Value
+                                    } else { ; 2 outputs or 2 inputs
+                                        processedText := paramOrder[command.SCM.ParamOrder[1]].Value
+                                                       . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
+                                                       . paramOrder[command.SCM.ParamOrder[2]].Value
+                                    }
+                                case 3:
+                                    processedText := paramOrder[command.SCM.ParamOrder[3]].Value
+                                                   . " = "
+                                                   . paramOrder[command.SCM.ParamOrder[1]].Value
+                                                   . " " . command.SBL["operator"] . " "
+                                                   . paramOrder[command.SCM.ParamOrder[2]].Value
+                            }
+                        } else { ; normal parsing
+                            isClassValid := (preferClassSyntax and command.SBL.Has("class") and command.SBL.Has("member"))
+
+                            if isClassValid {
+                                processedText := command.SBL["class"] . "." . command.SBL["member"] . "("
+                            } else {
+                                processedText := StrLower(command.SBL["name"])
+                            }
+                            index := 0
+                            if command.SBL.Has("input") and (command.SBL["input"].Length >= 1) {
+                                Loop ((command.ParseType == eCOMMANDPARSETYPE.InputArgument) ? paramOrder.Length : command.SBL["input"].Length) {
+                                    index++
+                                    if !isClassValid {
+                                        processedText .= ((
+                                            command.SBL["input"].Has(A_Index) and command.SBL["input"][A_Index].Has("name")
+                                            and (Trim(command.SBL["input"][A_Index]["name"]) != ""))
+                                            ? (" {" . command.SBL["input"][A_Index]["name"] . "} ")
+                                            : " ")
+                                    } else if (A_Index != 1) {
+                                        processedText .= ", "
+                                    }
+                                    processedText .= paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                }
+                            }
+
+                            if (command.ParseType != eCOMMANDPARSETYPE.InputArgument)
+                            and command.SBL.Has("output") and (command.SBL["output"].Length >= 1) {
+                                iterations := ((command.ParseType == eCOMMANDPARSETYPE.OutputArgument) ? (paramOrder.Length - (command.SBL.Has("input") ? command.SBL["input"].Length : 0)) : command.SBL["output"].Length)
+                                    ; check if user passed a literal value as output param
+                                loopIndex := index
+                                paramHasLiteralValue := false
+                                Loop iterations {
+                                    loopIndex++
+                                    if paramOrder[(loopIndex <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[loopIndex] : loopIndex].IsLiteral {
+                                        paramHasLiteralValue := true
+                                        break
+                                    }
+                                }
+                                    ;
+                                if paramHasLiteralValue {
+                                    Loop iterations {
+                                        index++
+                                        if !isClassValid {
+                                            processedText .= ((
+                                                command.SBL["input"].Has(A_Index) and command.SBL["input"][A_Index].Has("name")
+                                                and (Trim(command.SBL["input"][A_Index]["name"]) != ""))
+                                                ? (" {" . command.SBL["input"][A_Index]["name"] . "} ")
+                                                : " ")
+                                        } else if (A_Index != 1) or (command.SBL.Has("input") and (command.SBL["input"].Length >= 1)) { ; has input param specified
+                                            processedText .= ", "
+                                        }
+                                        processedText .= paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                    }
+                                } else {
+                                    outputText := ""
+                                    Loop iterations {
+                                        index++
+                                        outputText .= ((A_Index == 1)?"":", ")
+                                            . paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                    }
+                                    processedText := outputText . " = " . processedText
+                                }
+                            }
+
+                            if isClassValid {
+                                processedText .= ")"
+                            }
+
+                            if command.IsLogicNot {
+                                processedText := "not " . processedText
+                            }
+                        }
+                            ;
+                        textLine := StrReplace(textLine, fromText, processedText)
+                    }
+                }
+            }
+        }
+            ; replace breaking changes into their sb4 counterpart
+        for , value in [["$player_actor", "$scplayer"], ["$player_char, $player1"]] {
+            if InStr(textLine, value[1]) {
+                textLine := StrReplace(textLine, value[1], value[2])
+            }
+        }
+            ;
+        convertedText .= textLine . "`r`n"
+        lineCount++
+    }
+
+    if IsSet(Gui_ControlPanel) {
+        ShowWarnings(warning)
+    }
+    if convertedText {
+        convertedText := "/*"
+                       .    "`n`tThis Source Code has been converted to SBL using:"
+                       .        "`n`t`tApplication: " . AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch
+                       .        "`n`t`tGame: " . targetGame
+                       .        "`n`t`tSBL Version: " . sblVersion
+                       . "`n*/`n`n"
+                       . convertedText
+    }
+    return convertedText
+}
+; #endregion ~~~~~~~~~~~~~ SNIPPETS / FUNCTIONS ~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~~~~~~~~ CLASSES ~~~~~~~~~~~~~~~~~~~~
+
+; #endregion ~~~~~~~~~~~~~~~~~~~~ CLASSES ~~~~~~~~~~~~~~~~~~~~
+
+; #region ~~~~~~~~~~~~~~~~~~~~~~ INCLUDES ~~~~~~~~~~~~~~~~~~~~
+#include JXON.ahk2 ; https://raw.githubusercontent.com/TheArkive/JXON_ahk2/refs/heads/master/_JXON.ahk
+#include AutoXYWH.ahk2 ; https://www.autohotkey.com/boards/viewtopic.php?f=83&t=114445
+; #endregion ~~~~~~~~~~~~~~~~~~~ INCLUDES ~~~~~~~~~~~~~~~~~~~~

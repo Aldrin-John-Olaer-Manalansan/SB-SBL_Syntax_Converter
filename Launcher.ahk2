@@ -1,0 +1,17 @@
+﻿#Requires AutoHotkey v2
+#SingleInstance Ignore ; Don't rerun itself
+#Warn ; Enable warnings to assist with detecting common errors
+#NoTrayIcon
+
+if (A_Args.Length >= 1) {
+    paramsText := ""
+    loop A_Args.Length {
+        A_Args[A_Index] := StrReplace(A_Args[A_Index], '"') ; replace all quotation marks
+        paramsText .= ' "' . A_Args[A_Index] . '"'
+    }
+
+    exitCode := RunWait('"' . A_ScriptDir . '\x' . (A_Is64bitOS?'64':'86') . '\SB-SBL Syntax Converter.exe"' . paramsText)
+    exitapp exitCode
+}
+run('"' . A_ScriptDir . '\x' . (A_Is64bitOS?'64':'86') . '\SB-SBL Syntax Converter.exe"')
+exitapp
