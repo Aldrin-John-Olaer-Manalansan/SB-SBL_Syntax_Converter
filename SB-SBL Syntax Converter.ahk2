@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 1, Patch: 0 }
+AppVersion := { Major: 1, Minor: 2, Patch: 0 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -94,6 +94,8 @@ if (A_Args.Length >= 2) { ; User is interacting to this script via CMD
     CLIProcessSourceCode(A_Args*)
 }
 
+gConvertedText := Array("", "")
+
 ; #region ~~~~~~~~~~~~~~~~~~~~~~~~~~~ Construct the Control Panel GUI
 Gui_ControlPanel := Gui("Resize OwnDialogs Disabled", Gui_ControlPanel_DefaultTitle)
 Gui_ControlPanel.BackColor := GUIBACKGROUND
@@ -103,9 +105,9 @@ Gui_ControlPanel.AddTab3("vTabs", ["Main", "Settings"]).SetFont("bold")
 Gui_ControlPanel["Tabs"].UseTab(1)  ; Add Controls at the Main Tab
 Gui_ControlPanel.AddText("X30 Y50", "Game:")
 Gui_ControlPanel.AddDDL("X+2 H20 W50 vGame R" . gSettings.Games.Length . " Choose" . gSettings.Game, gSettings.Games).OnEvent("Change", GameChanged)
-Gui_ControlPanel.AddCheckBox("X+m H20 vUseClass Checked" . gSettings.UseClass, "Use Class").OnEvent("Click", SaveGeneralSettingToIni)
+Gui_ControlPanel.AddCheckBox("X+m H20 vUseClass Checked" . gSettings.UseClass, "Use Class").OnEvent("Click", ViewModeChanged)
 Gui_ControlPanel.AddButton("X+m H20", "Save Converted Source Code").OnEvent("Click", SaveConvertedText)
-Gui_ControlPanel.AddButton("X30 Y+10 H20", "Browse Source Code").OnEvent("Click", BrowseSourceCode)
+Gui_ControlPanel.AddButton("X30 Y+10 H20 vBrowseSC", "Browse Source Code").OnEvent("Click", BrowseSourceCode)
 Gui_ControlPanel.AddEdit("X+m W250 H20 vTargetPath ReadOnly Background" . EDITCTRLBACKGROUND)
 Gui_ControlPanel.AddEdit("X30 Y+10 W670 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND)
 Gui_ControlPanel.AddEdit("X450 Y35 W250 H73 vWarnings ReadOnly Background" . EDITCTRLBACKGROUND).SetFont("s8")
@@ -203,8 +205,17 @@ GameChanged(*) {
     ReloadDefinitions()
 }
 
-SaveGeneralSettingToIni(GuiCtrlObj, Info) {
-    IniWrite(GuiCtrlObj.Value, INIPATH, "General", GuiCtrlObj.Name)
+ViewModeChanged(*) {
+    IniWrite(Gui_ControlPanel["UseClass"].Value, INIPATH, "General", Gui_ControlPanel["UseClass"].Name)
+    scrollBarPos := DllCall("user32\GetScrollPos", "Ptr", Gui_ControlPanel["ConvertedText"].Hwnd, "Int", 1) ; get vertical scrollbar position
+    Gui_ControlPanel["ConvertedText"].Value := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1]
+    SendMessage(
+                                  0x0115, ; WM_VSCROLL ; tells the control that a scrolling event happened
+                     (scrollBarPos << 16) ; HIWORD = scrollbar position
+        |                              4, ; SB_THUMBPOSITION ; indicate that we dragged the scrollbar to the position then released it
+                                       0, ; Edit control uses standard scrollbar, therefore NULL
+        Gui_ControlPanel["ConvertedText"] ;
+    )
 }
 
 SaveDefinitionSettingToIni(GuiCtrlObj, Info := "") {
@@ -273,19 +284,33 @@ PreloadConvertedText(sourceCodePath) {
 }
 
 GUIProcessSourceCode(sourceCodePath) {
+    global gConvertedText
+
 	Gui_ControlPanel.Opt("+OwnDialogs")
     if !ValidateSBDir(Gui_ControlPanel["SBDir"].Value) {
         Gui_ControlPanel["Tabs"].Choose(2) ; go to settings panel
         MsgBox("Please browse Sanny Builder Root Directory first", "Invalid Sanny Builder Directory", 16)
         return
     }
+        ; disable interation with the GUI
     Gui_ControlPanel.Opt("+Disabled")
+    Gui_ControlPanel["UseClass"].Enabled := false
+    Gui_ControlPanel["BrowseSC"].Enabled := false
+        ; initialize global variables
     Gui_ControlPanel["TargetPath"].Value := sourceCodePath
     Gui_ControlPanel["Warnings"].Value := ""
     Gui_ControlPanel["ConvertedText"].Value := ""
+    gConvertedText[1] := ""
+    gConvertedText[2] := ""
+        ;
     InitializeVariables(Gui_ControlPanel["SBDir"].Value, Gui_ControlPanel["Game"].Text)
-    Gui_ControlPanel["ConvertedText"].Value := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, Gui_ControlPanel["UseClass"].Value)
-    Gui_ControlPanel.Opt("-Disabled")
+    Gui_ControlPanel["ConvertedText"].Value := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, Gui_ControlPanel["UseClass"].Value)
+    Gui_ControlPanel.Opt("-Disabled") ; enable interation with the GUI except the operation buttons
+        ; wait for the alternative converted text view to finish before reenabling the operation buttons
+    gConvertedText[!Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, !Gui_ControlPanel["UseClass"].Value)
+        ; reenable operation buttons
+    Gui_ControlPanel["UseClass"].Enabled := true
+    Gui_ControlPanel["BrowseSC"].Enabled := true
 }
 
 CLIProcessSourceCode(inputSourceCode, sannyBuilderDirectory, targetGame, useClass := "", outputSourceCode := "", unused*) {
