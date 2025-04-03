@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 0, Patch: 2 }
+AppVersion := { Major: 1, Minor: 1, Patch: 0 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -29,7 +29,8 @@ EDITCTRLBACKGROUND := "1F1F1F" ; "1F1F1F" ; "303841"
 RELATIVEPATHSIGN := "\"
 DEFINITIONDELIMITER := "><"
 INIDELIMITER := "|#@$::$@#|"
-eCOMMANDPARSETYPE := {Invalid: 0, Normal: 1, OutputArgument: 2, InputArgument: 3}
+ePARSEMODE := {Command:0, ConstField: 1, EnumField: 2, OthersField: 3}
+ePARAMSPARSETYPE := {Invalid: 0, Normal: 1, OutputArgument: 2, InputArgument: 3}
 eEXITERRORCODES := {
     InsufficientParamCount: 1, 
     InvalidInputSourceCode: 2,
@@ -56,9 +57,9 @@ REGEXCOMMENTSANDSPACES := "(?:[ \t]*(?:" . REGEXALLCOMMENTS . "))*[ \t]*"
 REGEXAVOIDBODYCOMMENTS     := "(?:[ \t]*(?:" . REGEXBOUNDEDCOMMENT . "))*"
 ;REGEXENDOFWORD := "(?:[ \t]|$)"
 REGEXIGNOREINICOMMENTS := "^[ \t]*[^;#\/]*[ \t]*"
-REGEXPARSEMULTICONST := "i)^const[ \t]+(.*)$"
 REGEXLEFTHANDSIDE := "^(\w+?)[ \t]*="
-REGEXPARSESINGLECONST := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
+REGEXPARSEEQUALITY := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
+REGEXPARSEMULTICONST := "i)^const[ \t]+(.*)$"
 REGEXENUMNAME := "i)^enum[ \t]+(.+)$"
 REGEXOPTIONALARRAY := "(?:\[.+?\]|\(.+?,.+?\))?"
 REGEXLVAR := "\d+?@[SsVv]?" ; Local Variable
@@ -411,7 +412,7 @@ LoadSettings() {
 }
 
 InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, ignoreComments := true) {
-    global scmCommandsMap, sblCommandsMap, predefConsts, predefKeywords, sblVersion
+    global scmCommandsMap, sblCommandsMap, dataTypesMap, predefinedDeclarations, predefinedKeywords, sblVersion
 
     warning := ""
     workPath := sannyBuilderDir . "\data\" . game
@@ -446,6 +447,27 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
             sblCommandsMap[extensionName][opcode] := command
         }
     }
+
+        ; get all possible datatypes
+    dataTypesMap := Map("int", true, "float", true, "string", true) ; initialize map and default values
+    for , extension in sblCommandsMap {
+        for , command in extension {
+            if command.Has("class") and !dataTypesMap.Has(command["class"]) {
+                dataTypesMap[command["class"]] := true ; add this class name to our list of known datatypes
+            }
+            for key in ["input", "output"] {
+                if !command.Has(key) {
+                    continue
+                }
+                for , element in command[key] {
+                    if element.Has("type") and !dataTypesMap.Has(element["type"]) {
+                        dataTypesMap[element["type"]] := true ; add this data type to our list of known datatypes
+                    }
+                }
+            }
+        }
+    }
+        ;
 
         ; get the list of ini extension names
     scmIniExtensions := Map()
@@ -519,19 +541,19 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
         }
     }
 
-    predefConsts := Map()
+    predefinedDeclarations := Map()
         ; constants which doesn't require {$include}
     for , filePath in [RELATIVEPATHSIGN . "constants.txt", RELATIVEPATHSIGN . "enums.txt"] {
-        warning .= UpdatePredefConsts(&predefConsts, filePath, workPath, false)
+        warning .= UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, false)
     }
         ; constants which requires {$include}
     if gSettings.ConstantsEnumsFilePaths[game] {
         Loop Parse gSettings.ConstantsEnumsFilePaths[game], "`n", " `t" {
-            warning .= UpdatePredefConsts(&predefConsts, A_LoopField, workPath, true)
+            warning .= UpdatePredefinedDeclarations(&predefinedDeclarations, A_LoopField, workPath, true)
         }
     }
     
-    predefKeywords := Map()
+    predefinedKeywords := Map()
     parsedText := RELATIVEPATHSIGN . "keywords.txt"
     if gSettings.KeywordsFilePaths[game] {
         parsedText .= "`n" . gSettings.KeywordsFilePaths[game]
@@ -555,10 +577,10 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
             textLine := fileObj.ReadLine()
             if RegExMatch(textLine, REGEXIGNOREINICOMMENTS . "([[:xdigit:]]{4})[ \t]*=[ \t]*(.+)", &matchedText) {
                 keyword := StrLower(matchedText[2])
-                if !ignoreDuplicateKeywords and predefKeywords.Has(keyword) {
-                    warning .= "DuplicateDefinitions: keywords.txt/" . keyword . " -> (" . Format("{:04X}", predefKeywords[keyword]) . " | " . matchedText[1] . ")`n"
+                if !ignoreDuplicateKeywords and predefinedKeywords.Has(keyword) {
+                    warning .= "DuplicateDefinitions: keywords.txt/" . keyword . " -> (" . Format("{:04X}", predefinedKeywords[keyword]) . " | " . matchedText[1] . ")`n"
                 }
-                predefKeywords[keyword] := ("0x" . matchedText[1]) + 0 ; add keyword to our list of known keywords
+                predefinedKeywords[keyword] := ("0x" . matchedText[1]) + 0 ; add keyword to our list of known keywords
             }
         }
     }
@@ -578,10 +600,10 @@ ShowWarnings(warnings) {
     if legend {
         warnings .= "`n`n~~~Warning Descriptions~~~" . legend . "`n`nCheck this tool's Github Issue page for possible fixes."
     }
-    Gui_ControlPanel["Warnings"].Value := warnings
+    Gui_ControlPanel["Warnings"].Value .= warnings
 }
 
-GetCommandParseType(usedExtensions, opcode, params, &command) {
+GetParamsParseType(usedExtensions, opcode, params, &command) {
     if (opcode >= 0x8000) {
         isLogicNot := true
         opcode &= 0x7FFF ; flip the not bit
@@ -593,62 +615,80 @@ GetCommandParseType(usedExtensions, opcode, params, &command) {
         or !sblCommandsMap.Has(extension) or !sblCommandsMap[extension].Has(opcode) or !sblCommandsMap[extension][opcode].Has("num_params") {
             continue
         }
-        if sblCommandsMap[extension][opcode].Has("output")
-        and (sblCommandsMap[extension][opcode]["output"][sblCommandsMap[extension][opcode]["output"].Length]["type"] == "arguments") {
-            command := {ParseType: eCOMMANDPARSETYPE.OutputArgument, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
-            return eCOMMANDPARSETYPE.OutputArgument
-        } else if sblCommandsMap[extension][opcode].Has("input")
-        and (sblCommandsMap[extension][opcode]["input"][sblCommandsMap[extension][opcode]["input"].Length]["type"] == "arguments") {
-            command := {ParseType: eCOMMANDPARSETYPE.InputArgument, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
-            return eCOMMANDPARSETYPE.InputArgument
-        } else if (params.Length == sblCommandsMap[extension][opcode]["num_params"]) {
-            command := {ParseType: eCOMMANDPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommandsMap[extension][opcode], SBL: sblCommandsMap[extension][opcode]}
-            return eCOMMANDPARSETYPE.Normal
+        scmCommand := scmCommandsMap[extension][opcode]
+        sblCommand := sblCommandsMap[extension][opcode]
+        if sblCommand.Has("output") and sblCommand["output"][sblCommand["output"].Length].Has("type")
+        and (sblCommand["output"][sblCommand["output"].Length]["type"] == "arguments") {
+            command := {ParseType: ePARAMSPARSETYPE.OutputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+            return ePARAMSPARSETYPE.OutputArgument
+        } else if sblCommand.Has("input") and sblCommand["input"][sblCommand["input"].Length].Has("type")
+        and (sblCommand["input"][sblCommand["input"].Length]["type"] == "arguments") {
+            command := {ParseType: ePARAMSPARSETYPE.InputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+            return ePARAMSPARSETYPE.InputArgument
+        } else if (params.Length == sblCommand["num_params"]) {
+            command := {ParseType: ePARAMSPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+            return ePARAMSPARSETYPE.Normal
         }
     }
-    return eCOMMANDPARSETYPE.Invalid
+    return ePARAMSPARSETYPE.Invalid
 }
 
-UpdateEnums(name, field, &constantMap, groupKey := "") {
+CheckAutoAssignedVariables(processedText, &declarationsMap) {
+    for dataType in dataTypesMap {
+        if !RegExMatch(processedText, "i)^" . dataType . "[ \t]+(.+)$", &value) {
+            continue
+        } ; line is an Auto Assigned Variables declaration
+        For value in StrSplit(value[1], ",", " `t") { ; parses each field separated by comma: dVar1 = 3, dVar2, dVar3 = dVar1, dVar4 = var
+            if RegExMatch(value, REGEXPARSEEQUALITY, &value) { ; contents of value were value[1] = value[2]
+                value := value[1]
+            }
+            declarationsMap[value] := false ; declaration is a variable
+        }
+        return true ; processedText is an autoassigned variable declaration
+    }
+    return false ; processedText is not an autoassigned variable declaration
+}
+
+UpdateEnums(name, field, &declarationsMap, groupKey := "") {
     if RegExMatch(field, REGEXLEFTHANDSIDE, &matchedText) {
         field := matchedText[1]
     }
     name := StrLower(name) . "." . StrLower(field)
-    if groupKey { ; store in a constant group
-        constantMap[StrLower(groupKey)][name] := true ; constant's value is literal
-    } else { ; store in a constant list
-        constantMap[name] := true ; constant's value is literal
+    if groupKey { ; store in a declaration group
+        declarationsMap[StrLower(groupKey)][name] := true ; enum's value is literal
+    } else { ; store in a declaration list
+        declarationsMap[name] := true ; enum's value is literal
     }
 }
 
-UpdateConstants(value, &constantMap, groupKey := "") {
-    For value in StrSplit(value, ",", " `t") {
-        if !RegExMatch(value, REGEXPARSESINGLECONST, &value) {
+UpdateConstants(value, &declarationsMap, groupKey := "") {
+    For value in StrSplit(value, ",", " `t") { ; parses each field separated by comma: c1 = literalconst, c2 = var2, c3 = c2
+        if !RegExMatch(value, REGEXPARSEEQUALITY, &value) {
             continue
         }
         leftHandSide := StrLower(value[1])
         rightHandSide := StrLower(value[2])
-        ; add constant to our list of known constants
+        ; add constant to our list of known declarations
         ; value = 0 = variable
         ; value = 1 = literal
-        if groupKey { ; store in a constant group
-            constantMap[groupKey][leftHandSide] := !RegExMatch(rightHandSide, REGEXVARARRAY)
-        } else { ; store in a constant list
+        if groupKey { ; store in a declaration group
+            declarationsMap[groupKey][leftHandSide] := !RegExMatch(rightHandSide, REGEXVARARRAY)
+        } else { ; store in a declaration list
             if RegExMatch(rightHandSide, REGEXVARARRAY) {
-                constantMap[leftHandSide] := false ; constant's value is a variable
+                declarationsMap[leftHandSide] := false ; constant's value is a variable
                 return
-            } else for constant in constantMap {
+            } else for constant in declarationsMap {
                 if (rightHandSide = constant) { ; constant's value is equal to another constant's value (case insensitive)
-                    constantMap[leftHandSide] := constantMap[constant]
+                    declarationsMap[leftHandSide] := declarationsMap[constant]
                     return
                 }
             }
-            constantMap[leftHandSide] := true ; constant's value is literal
+            declarationsMap[leftHandSide] := true ; constant's value is literal
         }
     }
 }
 
-UpdatePredefConsts(&predefConsts, filePath, workPath, requiresInclude := false) {
+UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, requiresInclude := false) {
         ; Remove Comments
     posL := InStr(filePath, DEFINITIONDELIMITER)
     if posL {
@@ -666,8 +706,8 @@ UpdatePredefConsts(&predefConsts, filePath, workPath, requiresInclude := false) 
         return "Can't open constants/enums file: " . filePath . "`n"
     }
 
-    if !predefConsts.Has(groupKey) { ; this group is new from our list of constants groups
-        predefConsts[groupKey] := Map()
+    if !predefinedDeclarations.Has(groupKey) { ; this group is new from our list of constants groups
+        predefinedDeclarations[groupKey] := Map()
     }
 
     parseMode := 0
@@ -676,22 +716,22 @@ UpdatePredefConsts(&predefConsts, filePath, workPath, requiresInclude := false) 
         if (textLine == "") {
             continue
         } else if parseMode and (textLine = "end") {
-            parseMode := 0 ; switch to parse command mode
+            parseMode := ePARSEMODE.Command ; switch to parse command mode
             continue
         }
         switch (parseMode) {
-        Case 1: ; Const ... End
-            UpdateConstants(textLine, &predefConsts, groupKey)
-        Case 2: ; Enum ... End
-            UpdateEnums(enumName, textLine, &predefConsts, groupKey)
+        Case ePARSEMODE.ConstField: ; Const ... End
+            UpdateConstants(textLine, &predefinedDeclarations, groupKey)
+        Case ePARSEMODE.EnumField: ; Enum ... End
+            UpdateEnums(enumName, textLine, &predefinedDeclarations, groupKey)
         Default: ; Command
             if (textLine = "const") {
-                parseMode := 1 ; switch to parse const mode
+                parseMode := ePARSEMODE.ConstField ; switch to parse const mode
             } else if RegExMatch(textLine, REGEXENUMNAME, &matchedText) {
-                parseMode := 2 ; switch to parse enum mode
+                parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
                 enumName := matchedText[1]
             } else if RegExMatch(textLine, REGEXPARSEMULTICONST, &matchedText) {
-                UpdateConstants(matchedText[1], &predefConsts, groupKey)
+                UpdateConstants(matchedText[1], &predefinedDeclarations, groupKey)
             }
         }
     }
@@ -712,9 +752,9 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
     REGEXCOMMANDSTARTINGBARRIER := "^(?:[ \t]*(?:if|then|else|while|until|" . REGEXALLCOMMENTS . "))*[ \t]*"
     
     usedExtensions := Map()
-    constantMap := Map()
-    for key in predefConsts[DEFINITIONDELIMITER] { ; add preloaded constants to our list of known constants
-        constantMap[key] := predefConsts[DEFINITIONDELIMITER][key]
+    declarationsMap := Map()
+    for key in predefinedDeclarations[DEFINITIONDELIMITER] { ; add preloaded constants to our list of known constants
+        declarationsMap[key] := predefinedDeclarations[DEFINITIONDELIMITER][key]
     }
 
     parseMode := 0
@@ -731,9 +771,9 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                     if scmCommandsMap.Has(key) and sblCommandsMap.Has(key) {
                         usedExtensions[key] := true
                     }
-                } else if predefConsts.Has(key) { ; process includes
-                    for field in predefConsts[key] { ; add all the constants of this included file to our list of known constants
-                        constantMap[field] := predefConsts[key][field]
+                } else if predefinedDeclarations.Has(key) { ; process includes
+                    for field in predefinedDeclarations[key] { ; add all the constants of this included file to our list of known constants
+                        declarationsMap[field] := predefinedDeclarations[key][field]
                     }
                 }
             }
@@ -743,34 +783,36 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
             processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
 
             switch (parseMode) {
-            Case 1: ; Const ... End
+            Case ePARSEMODE.ConstField: ; Const ... End
                 if (processedText = "end") {
-                    parseMode := 0 ; switch to parse command mode
+                    parseMode := ePARSEMODE.Command ; switch to parse command mode
                 } else {
-                    UpdateConstants(processedText, &constantMap)
+                    UpdateConstants(processedText, &declarationsMap)
                 }
-            Case 2: ; Enum ... End
+            Case ePARSEMODE.EnumField: ; Enum ... End
                 if (processedText = "end") {
-                    parseMode := 0 ; switch to parse command mode
+                    parseMode := ePARSEMODE.Command ; switch to parse command mode
                 } else {
-                    UpdateEnums(enumName, processedText, &constantMap)
+                    UpdateEnums(enumName, processedText, &declarationsMap)
                 }
-            Case 3: ; Var ... End , Hex ... End
+            Case ePARSEMODE.OthersField: ; Var ... End , Hex ... End
                 if (processedText = "end") {
-                    parseMode := 0 ; switch to parse command mode
+                    parseMode := ePARSEMODE.Command ; switch to parse command mode
                 }
             Default: ; Command
                 if (processedText = "const") {
-                    parseMode := 1 ; switch to parse const mode
+                    parseMode := ePARSEMODE.ConstField ; switch to parse const mode
                 } else if RegExMatch(processedText, REGEXENUMNAME, &matchedText) {
-                    parseMode := 2 ; switch to parse enum mode
+                    parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
                     enumName := matchedText[1]
                 } else if (processedText = "var") or (processedText = "hex") {
-                    parseMode := 3 ; switch to parse var mode
-                } else if RegExMatch(processedText, REGEXPARSEMULTICONST, &matchedText) {
-                    UpdateConstants(matchedText[1], &constantMap)
+                    parseMode := ePARSEMODE.OthersField ; indicate that we are inside a parsing field that we aren't interested
+                } else if RegExMatch(processedText, REGEXPARSEMULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
+                    UpdateConstants(matchedText[1], &declarationsMap)
+                } else if CheckAutoAssignedVariables(processedText, &declarationsMap) { ; <datatype> var1, va2, ...
+                    ; declarationsMap now contains all the variables defined by this line
                 } else {
-                    ; create array of params found at processedText
+                        ; create array of params found at processedText
                     paramOrder := Array()
                     pos := 1
                     while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
@@ -782,30 +824,34 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                             paramOrder.Push({Value: term, IsLiteral: false}) ; add var to list of params
                         } else if RegExMatch(term, REGEXLITERALS) {
                             paramOrder.Push({Value: term, IsLiteral: true}) ; add literal to list of params
-                        } else For key in constantMap {
-                            if RegExMatch(term, "i)(" . key . ")" . REGEXOPTIONALARRAY, &matchedText) { ; term is a constant (case insensitive)
-                                paramOrder.Push({Value: matchedText[1], IsLiteral: constantMap[key]})
+                        } else For key in declarationsMap {
+                            if RegExMatch(term, "i)^(" . StrReplace(key, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
+                                paramOrder.Push({Value: matchedText[1], IsLiteral: declarationsMap[key]})
                                 break
                             }
                         }
                     }
-    
+                        ;
+                    
+                        ; get the opcode and its information that is compatible with the number of detected parameters
                     command := ""
                     if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
                         checkOpcode := ("0x" . matchedText[1]) + 0
-                        if (GetCommandParseType(usedExtensions, checkOpcode, paramOrder, &command) == eCOMMANDPARSETYPE.Invalid) {
+                        if (GetParamsParseType(usedExtensions, checkOpcode, paramOrder, &command) == ePARAMSPARSETYPE.Invalid) {
                             warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
                         }
-                    } else for key in predefKeywords {
+                    } else for key in predefinedKeywords {
                         if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
-                            if (GetCommandParseType(usedExtensions, predefKeywords[key], paramOrder, &command) != eCOMMANDPARSETYPE.Invalid) {
+                            if (GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder, &command) != ePARAMSPARSETYPE.Invalid) {
                                 break
                             } else {
-                                warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefinedKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
                             }
                         }
                     }
-                    if IsObject(command) and (command.ParseType != eCOMMANDPARSETYPE.Invalid) {
+                        ;
+                    
+                    if IsObject(command) and (command.ParseType != ePARAMSPARSETYPE.Invalid) {
                             ; scm command to sbl command
                         if command.SBL.Has("operator") {
                                 ; declare var type for each params
@@ -872,7 +918,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                             }
                             index := 0
                             if command.SBL.Has("input") and (command.SBL["input"].Length >= 1) {
-                                Loop ((command.ParseType == eCOMMANDPARSETYPE.InputArgument) ? paramOrder.Length : command.SBL["input"].Length) {
+                                Loop ((command.ParseType == ePARAMSPARSETYPE.InputArgument) ? paramOrder.Length : command.SBL["input"].Length) {
                                     index++
                                     if !isClassValid {
                                         processedText .= ((
@@ -887,9 +933,9 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                                 }
                             }
 
-                            if (command.ParseType != eCOMMANDPARSETYPE.InputArgument)
+                            if (command.ParseType != ePARAMSPARSETYPE.InputArgument)
                             and command.SBL.Has("output") and (command.SBL["output"].Length >= 1) {
-                                iterations := ((command.ParseType == eCOMMANDPARSETYPE.OutputArgument) ? (paramOrder.Length - (command.SBL.Has("input") ? command.SBL["input"].Length : 0)) : command.SBL["output"].Length)
+                                iterations := ((command.ParseType == ePARAMSPARSETYPE.OutputArgument) ? (paramOrder.Length - (command.SBL.Has("input") ? command.SBL["input"].Length : 0)) : command.SBL["output"].Length)
                                     ; check if user passed a literal value as output param
                                 loopIndex := index
                                 paramHasLiteralValue := false
