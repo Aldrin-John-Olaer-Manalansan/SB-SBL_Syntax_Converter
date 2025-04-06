@@ -1,7 +1,9 @@
 # AJOM's SB->SBL Syntax Converter
  Convert Source Codes from Legacy SB .cs Syntax into SBL .cs Syntax
 
-![demo](https://github.com/user-attachments/assets/79eb4c75-92ca-4c2e-8448-bbad44d2d7d4)
+![usagedemo](https://github.com/user-attachments/assets/1806fccf-76d2-4eb0-883e-c2c740f44a32)
+
+![switchviewmodedemo](https://github.com/user-attachments/assets/23d04e40-20da-4d7f-867e-1cbe59bb0b1c)
 
 <br>
 
@@ -59,7 +61,7 @@ Example:
 "C:\SB-SBL Syntax Converter\launcher.exe" "C:\somefolder\myscript.txt" "C:\Sanny Builder 4" vc 0
 ```
 
-the OutputSourceCodePath is the same as InputSourceCodePath, but with additional non-overwriting suffix "***_SBL\<UniqueNumber\>***"
+the OutputSourceCodePath is the same as InputSourceCodePath, but with an additional non-overwriting suffix "***_SBL\<UniqueNumber\>***"
 
 <br>
 
@@ -74,7 +76,7 @@ Example:
 "C:\SB-SBL Syntax Converter\launcher.exe" "C:\somefolder\myscript.txt" "C:\Sanny Builder 4" sa
 ```
 
-UseClass field will use the settings.ini value, while the OutputSourceCodePath is the same as InputSourceCodePath, but with additional non-overwriting suffix "***_SBL\<UniqueNumber\>***"
+UseClass field will use the settings.ini value, while the OutputSourceCodePath is the same as InputSourceCodePath, but with an additional non-overwriting suffix "***_SBL\<UniqueNumber\>***"
 
 <br>
 
@@ -87,11 +89,11 @@ UseClass field will use the settings.ini value, while the OutputSourceCodePath i
 <br>
 
 ## GUI vs Command Line
-The GUI can warn you if it encounters problems along the conversion process.
+The GUI will warn you if problems have been encountered during the conversion process.
 
-The command line on the other hand doesn't support stdout. Meaning, you will not be able to tell wether the conversion is successful, or it encountered problems along the way.
+The command line on the other hand doesn't support stdout. Meaning, you will not be able to tell whether the conversion is successful, or whether it encountered problems along the way.
 
 <br>
 
 ## Technical Support:
-Visit the Issues page and let's try solving your problem with this tool. 
+Visit the [Issues page](https://github.com/Aldrin-John-Olaer-Manalansan/SB-SBL_Syntax_Converter/issues) to check for solutions or ask for help to solve your problem with this tool. 
