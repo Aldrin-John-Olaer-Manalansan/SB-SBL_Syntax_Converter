@@ -3,7 +3,7 @@
  * @Author: Aldrin John O. Manalansan (ajom)
  * @Email: aldrinjohnolaermanalansan@gmail.com
  * @Brief: Convert Source Codes from Legacy SB Syntax into SBL Syntax
- * @Last Update: April 2, 2025
+ * @Last Update: April 6, 2025
  */
 
 #Requires AutoHotkey v2
@@ -18,11 +18,14 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 2, Patch: 0 }
+AppVersion := { Major: 1, Minor: 3, Patch: 0 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
 
+GUIFONTNAME := "Consolas"
+GUIFONTSIZE := 10
+GUITEXTCOLOR := "FFFFFF"
 GUIBACKGROUND := "303841" ; "181818" ; "72787E"
 EDITCTRLBACKGROUND := "1F1F1F" ; "1F1F1F" ; "303841"
 
@@ -45,6 +48,7 @@ eWARNINGCODES := Map(
     "OpenFileFailed", "File is missing or it's locked used by another process",
     "InvalidOpcode", "Used by Developers to detect problems",
     "DetectParamsFailed", "Failed to detect all parameters of a command. Can be fixed by specifying the external constants file containing all constants used as a parameter of this command, at this Tool's Settings -> Constants/Enums Files.",
+    "InvalidParameter", "A detected parameter from a command might be causing a syntax error in Sanny Builder. Check its value if it's an Unknown Reference, or is causing Circular Referencing",
     "PropMissing", "A command in SBL's json file has a certain property that is missing. Used by Developers to detect problems.",
     "UnequalParams", "A command in SBL's json file has unequal parameter count. Used by Developers to detect problems.",
     "OpcodeUntraceable", "SCM opcode is missing in SBL. Used by Developers to detect problems.",
@@ -94,48 +98,83 @@ if (A_Args.Length >= 2) { ; User is interacting to this script via CMD
     CLIProcessSourceCode(A_Args*)
 }
 
+gHighlightedRegions := Array(Map(), Map())
 gConvertedText := Array("", "")
+if gSettings.UseClassicEdit { ; classic edit control is preferred
+    useRichEdit := false
+} else try useRichEdit := DllCall("LoadLibrary", "Str", "msftedit", "Ptr")
+catch {
+    useRichEdit := false
+}
 
 ; #region ~~~~~~~~~~~~~~~~~~~~~~~~~~~ Construct the Control Panel GUI
 Gui_ControlPanel := Gui("Resize OwnDialogs Disabled", Gui_ControlPanel_DefaultTitle)
 Gui_ControlPanel.BackColor := GUIBACKGROUND
-Gui_ControlPanel.SetFont("cWhite s10", "Consolas")
+Gui_ControlPanel.SetFont("s" . GUIFONTSIZE . " c" . GUITEXTCOLOR, GUIFONTNAME)
 Gui_ControlPanel.AddTab3("vTabs", ["Main", "Settings"]).SetFont("bold")
 
 Gui_ControlPanel["Tabs"].UseTab(1)  ; Add Controls at the Main Tab
 Gui_ControlPanel.AddText("X30 Y50", "Game:")
 Gui_ControlPanel.AddDDL("X+2 H20 W50 vGame R" . gSettings.Games.Length . " Choose" . gSettings.Game, gSettings.Games).OnEvent("Change", GameChanged)
 Gui_ControlPanel.AddCheckBox("X+m H20 vUseClass Checked" . gSettings.UseClass, "Use Class").OnEvent("Click", ViewModeChanged)
+if useRichEdit {
+    Gui_ControlPanel.AddCheckBox("X+m H20 vHighlightDetectedCommands Checked" . gSettings.HighlightDetectedCommands, "Highlight Detected Commands").OnEvent("Click", ViewModeChanged)
+}
 Gui_ControlPanel.AddButton("X+m H20", "Save Converted Source Code").OnEvent("Click", SaveConvertedText)
 Gui_ControlPanel.AddButton("X30 Y+10 H20 vBrowseSC", "Browse Source Code").OnEvent("Click", BrowseSourceCode)
-Gui_ControlPanel.AddEdit("X+m W250 H20 vTargetPath ReadOnly Background" . EDITCTRLBACKGROUND)
-Gui_ControlPanel.AddEdit("X30 Y+10 W670 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND)
-Gui_ControlPanel.AddEdit("X450 Y35 W250 H73 vWarnings ReadOnly Background" . EDITCTRLBACKGROUND).SetFont("s8")
+Gui_ControlPanel.AddEdit("X+m W480 H20 vTargetPath ReadOnly Background" . EDITCTRLBACKGROUND)
+if !useRichEdit { ; msftedit.dll is not loaded
+    Gui_ControlPanel.AddEdit("X30 Y+10 W1130 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND) ; create classic edit control
+} else {
+    try Gui_ControlPanel.AddCustom("X30 Y+10 W1130 H200 vConvertedText ClassRichEdit50W 0x800 0x4 0x200000")
+    catch { ; failsed to create richedit control
+        useRichEdit := false
+        Gui_ControlPanel.AddEdit("X30 Y+10 W1130 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND) ; create classic edit control
+    }
+    else { ; richedit control has been sucessfully created
+        RichEdit_SetBackgroundColor(Gui_ControlPanel["ConvertedText"], ("0x" . EDITCTRLBACKGROUND) + 0)
+        RICHEDITHEADER := RichEdit_ConstructHeader(
+            GUIFONTNAME,
+            GUIFONTSIZE,
+            ("0x" . GUITEXTCOLOR) + 0,
+            [
+                0x00FF00, ; Good
+                0xFF0000, ; Error
+                0xFFFF00  ; Var Declation
+            ]
+        )
+    }
+}
+Gui_ControlPanel.AddEdit("X680 Y35 W480 H73 vWarnings ReadOnly Background" . EDITCTRLBACKGROUND).SetFont("s8")
 
 Gui_ControlPanel["Tabs"].UseTab(2)  ; Add Controls at the Settings Tab
 Gui_ControlPanel.AddButton("X30 Y50 H20", "Browse Sanny Builder").OnEvent("Click", BrowseSannyBuilder)
-Gui_ControlPanel.AddEdit("X+m W500 H20 vSBDir ReadOnly Background" . EDITCTRLBACKGROUND, gSettings.SBDir)
-Gui_ControlPanel.AddText("X30 Y+20", "Configure Definitions Files for").SetFont("s9")
+Gui_ControlPanel.AddEdit("X+m W780 H20 vSBDir ReadOnly Background" . EDITCTRLBACKGROUND, gSettings.SBDir)
+Gui_ControlPanel.AddCheckBox("X+m H20 vUseClassicEdit Checked" . gSettings.UseClassicEdit, "Use Classic Textbox").OnEvent("Click", EditControlTypeChanged)
+Gui_ControlPanel.SetFont("s9")
+Gui_ControlPanel.AddText("X30 Y+20", "Configure Definitions Files for")
+Gui_ControlPanel.SetFont("s" . GUIFONTSIZE)
 Gui_ControlPanel.AddDDL("X+2 W50 H1 vConfigurationGameType R" . gSettings.Games.Length . " Choose" . gSettings.Game, gSettings.Games).OnEvent("Change", ReloadDefinitions)
 Gui_ControlPanel.SetFont("s9")
 Gui_ControlPanel.AddText("X+2", 'Separate each definitions by a single newline.')
 Gui_ControlPanel.AddText("X30 Y+10", 'Specify the full path to file or add backslash "\" at the beginning for Relative Path to SB\data\<game>')
 Gui_ControlPanel.AddText("X30 Y+3", 'Put "><" sign at the beginning of comments')
-Gui_ControlPanel.SetFont("s10 bold")
-Gui_ControlPanel.AddText("X100 Y+10 vConstEnumText_x", "Constants/Enums Files")
-Gui_ControlPanel.AddText("X+220 vKeywordsText_x", "Keywords Files")
+Gui_ControlPanel.SetFont("s" . GUIFONTSIZE . " bold")
+Gui_ControlPanel.AddText("X200 Y+10 vConstEnumText_x", "Constants/Enums Files")
+Gui_ControlPanel.AddText("X+460 vKeywordsText_x", "Keywords Files")
 Gui_ControlPanel.SetFont("norm")
-Gui_ControlPanel.AddEdit("X30 Y+10 W330 H125 vConstantsEnumsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
-Gui_ControlPanel.AddEdit("X+10 W330 H125 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+Gui_ControlPanel.AddEdit("X30 Y+10 W560 H125 vConstantsEnumsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+Gui_ControlPanel.AddEdit("X+10 W560 H125 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
 
 Gui_ControlPanel["Tabs"].UseTab()  ; Add Controls Outside the Tab
-Gui_ControlPanel.AddButton("X290 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan/SB-SBL_Syntax_Converter/issues"))
+Gui_ControlPanel.AddButton("X545 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan/SB-SBL_Syntax_Converter/issues"))
 Gui_ControlPanel["VisitIssues"].SetFont("s8")
 
 Gui_ControlPanel.OnEvent("DropFiles", DragAndDropFile)
 Gui_ControlPanel.OnEvent("Size",Gui_ControlPanel_Resize)
 Gui_ControlPanel.OnEvent("Close",Gui_ControlPanel_Closed)
 Gui_ControlPanel.Show("Center")
+
 sleep 500
 Gui_ControlPanel.Maximize()
 Gui_ControlPanel.Opt("-Disabled")
@@ -173,7 +212,13 @@ BrowseSannyBuilder(*)
         return
     }
     if !ValidateSBDir(selected) {
-        if (MsgBox("Cannot Find the data configuration directories`n`nWould you like to select a folder again?", "Invalid Sanny Builder Directory", 36) == "Yes") {
+        if (MsgBox(
+            "Cannot Find the data configuration directories`n`nWould you like to select a folder again?",
+            "Invalid Sanny Builder Directory",
+            4096 ; Always on top
+            + 64 ; Info Icon
+            +  4 ; Yes/No Buttons
+        ) == "Yes") {
             goto SelectSBDir
         }
         return
@@ -184,7 +229,7 @@ BrowseSannyBuilder(*)
 
 SaveConvertedText(*) {
 	Gui_ControlPanel.Opt("+OwnDialogs")
-    if (Gui_ControlPanel["ConvertedText"].Value == "")
+    if (Gui_ControlPanel["ConvertedText"].Text == "")
     or !(selected := FileSelect("S18", , "Select File", "Text (*.txt)")) {
         return
     }
@@ -195,8 +240,32 @@ SaveConvertedText(*) {
     if FileExist(selected) {
         FileDelete(selected)
     }
-    FileAppend(Gui_ControlPanel["ConvertedText"].Value, selected)
+    FileAppend(Gui_ControlPanel["ConvertedText"].Text, selected)
     msgbox "Converted Source Code has been saved at:`n" . selected
+}
+
+EditControlTypeChanged(*) {
+    if (MsgBox(
+        "Changing the textBox type requires restart. Please make sure to save your work before proceeding.`n`nContinue?",
+        "Confirmation",
+        4096 ; Always on top
+        + 32 ; Question Icon
+        +  4 ; Yes/No Buttons
+    ) == "Yes") {
+        IniWrite(Gui_ControlPanel["UseClassicEdit"].Value, INIPATH, "General", Gui_ControlPanel["UseClassicEdit"].Name)
+        Reload
+        sleep 3000
+        MsgBox(
+            "This program will now exit without restaring. Please manually launch this program after.",
+            "Reload Failed",
+            4096 ; Always on top
+            + 48 ; Exclamation Icon
+            +  0 ; OK Button
+        )
+        ExitApp
+    } else {
+        Gui_ControlPanel["UseClassicEdit"].Value := !Gui_ControlPanel["UseClassicEdit"].Value ; revert changes
+    }
 }
 
 GameChanged(*) {
@@ -207,14 +276,20 @@ GameChanged(*) {
 
 ViewModeChanged(*) {
     IniWrite(Gui_ControlPanel["UseClass"].Value, INIPATH, "General", Gui_ControlPanel["UseClass"].Name)
-    scrollBarPos := DllCall("user32\GetScrollPos", "Ptr", Gui_ControlPanel["ConvertedText"].Hwnd, "Int", 1) ; get vertical scrollbar position
-    Gui_ControlPanel["ConvertedText"].Value := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1]
+    scrollBarPos := DllCall("GetScrollPos", "Ptr", Gui_ControlPanel["ConvertedText"].Hwnd, "Int", 1, "Int") ; get vertical scrollbar position
+    
+    if useRichEdit {
+        SetConvertedRichTextControl()
+    } else {
+        Gui_ControlPanel["ConvertedText"].Text := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1]
+    }
+    
     SendMessage(
-                                  0x0115, ; WM_VSCROLL ; tells the control that a scrolling event happened
-                     (scrollBarPos << 16) ; HIWORD = scrollbar position
-        |                              4, ; SB_THUMBPOSITION ; indicate that we dragged the scrollbar to the position then released it
-                                       0, ; Edit control uses standard scrollbar, therefore NULL
-        Gui_ControlPanel["ConvertedText"] ;
+                 0x0115, ; WM_VSCROLL ; tells the control that a scrolling event happened
+    (scrollBarPos << 16) ; HIWORD = scrollbar position
+    |                 4, ; SB_THUMBPOSITION ; indicate that we dragged the scrollbar to the position then released it
+                      0, ; Edit control uses standard scrollbar, therefore NULL
+        Gui_ControlPanel["ConvertedText"]
     )
 }
 
@@ -246,8 +321,14 @@ DragAndDropFile(GuiObj, GuiCtrlObj, FileArray, X, Y)
     if (GuiCtrlObj != Gui_ControlPanel["ConvertedText"]) {
         return
     }
-    if Gui_ControlPanel["ConvertedText"].Value
-    and (MsgBox("Converting source code:`n" . FileArray[1] . "`n`nThe converted source code field will be updated. Continue?", "Confirmation", 36) == "No") {
+    if Gui_ControlPanel["ConvertedText"].Text
+    and (MsgBox(
+        "Converting source code:`n" . FileArray[1] . "`n`nThe converted source code field will be updated. Continue?",
+        "Confirmation",
+        4096 ; Always on top
+        + 32 ; Question Icon
+        +  4 ; Yes/No Buttons
+    ) != "Yes") {
         return
     }
     GUIProcessSourceCode(FileArray[1])
@@ -258,8 +339,8 @@ Gui_ControlPanel_Resize(GuiObj, MinMax, Width, Height) {
 		Return
 	AutoXYWH("wh", Gui_ControlPanel["Tabs"])
 	AutoXYWH("w", Gui_ControlPanel["SBDir"])
-	AutoXYWH("w0.5", Gui_ControlPanel["TargetPath"])
-	AutoXYWH("x0.5 w0.5", Gui_ControlPanel["Warnings"])
+	AutoXYWH("x", Gui_ControlPanel["UseClassicEdit"])
+	AutoXYWH("w", Gui_ControlPanel["Warnings"])
 	AutoXYWH("wh", Gui_ControlPanel["ConvertedText"])
 	AutoXYWH("x0.25", Gui_ControlPanel["ConstEnumText_x"])
 	AutoXYWH("x0.75", Gui_ControlPanel["KeywordsText_x"])
@@ -276,11 +357,65 @@ Gui_ControlPanel_Closed(*) {
 ; #endregion ~~~~~~~~~~~~~~~~ Events Handlers ~~~~~~~~~~~~~~~~
 
 ; #region ~~~~~~~~~~~~~~~~ SNIPPETS / FUNCTIONS ~~~~~~~~~~~~~~
+
 PreloadConvertedText(sourceCodePath) {
     checker := FileExist(sourceCodePath)
     if checker and !InStr(checker, "D") { ; file exist or is not a folder
         GUIProcessSourceCode(sourceCodePath)
     }
+}
+
+RichEdit_SetBackgroundColor(RECtrl, BGR) {
+    SendMessage( ; Set Background Color of our RichEdit
+        0x0443, ; EM_SETBKGNDCOLOR
+             0, ; Use Custom Color from LParam
+           BGR, ; 0xBBGGRR
+        RECtrl
+    )
+}
+
+HexToRichEditColorFont(hex) {
+    return "\red"   . ((hex >> 16) & 0xFF)
+         . "\green" . ((hex >>  8) & 0xFF)
+         . "\blue"  . ( hex        & 0xFF) . ";"
+}
+
+RichEdit_ConstructHeader(fontName, fontSize, defaultColorFont, colorFontTable) {
+    header := "{\rtf1\ansi{\fonttbl{\f0 " . fontName . ";}}{\colortbl" . HexToRichEditColorFont(defaultColorFont) 
+    for , colorFont in colorFontTable {
+        header .= HexToRichEditColorFont(colorFont) 
+    }
+    header .= "}\f0\fs" . fontSize * 2 . "\cf0\b0"
+    return header
+}
+
+SetRTF(RE, RTFString) {
+    buf := Buffer(StrPut(RTFString, "UTF-8"))
+    StrPut(RTFString, buf, "UTF-8")
+    SendMessage(0x000C, 0, buf, RE) ; 0x000C = WM_SETTEXT
+}
+
+SetConvertedRichTextControl() {
+    viewMode := Gui_ControlPanel["UseClass"].Value + 1
+    richText := RICHEDITHEADER
+    Loop parse gConvertedText[viewMode], "`n", "`r" {
+        if !Gui_ControlPanel["HighlightDetectedCommands"].Value ; command highlighting disabled
+        or !gHighlightedRegions[viewMode].Has(A_Index) { ; this text line has no highlighted command
+            richText .= RegExReplace(A_LoopField, "[\\{}]", "\$0")
+        } else { ; this text line has highlighted command
+            leadingText := SubStr(A_LoopField, 1, gHighlightedRegions[viewMode][A_Index].Pos - 1)
+            highlightedText := SubStr(A_LoopField, gHighlightedRegions[viewMode][A_Index].Pos, gHighlightedRegions[viewMode][A_Index].Len)
+            trailingText := SubStr(A_LoopField, gHighlightedRegions[viewMode][A_Index].Pos + gHighlightedRegions[viewMode][A_Index].Len)
+            leadingText := RegExReplace(leadingText, "[\\{}]", "\$0")
+            highlightedText := "{\b\cf" . gHighlightedRegions[viewMode][A_Index].CFI . " " . RegExReplace(highlightedText, "[\\{}]", "\$0") . "}"
+            trailingText := RegExReplace(trailingText, "[\\{}]", "\$0")
+            richText .= leadingText . highlightedText . trailingText
+            
+        }
+        richText .= "{\line}"
+    }
+    richText .= "}"
+    SetRTF(Gui_ControlPanel["ConvertedText"], richText)
 }
 
 GUIProcessSourceCode(sourceCodePath) {
@@ -289,7 +424,13 @@ GUIProcessSourceCode(sourceCodePath) {
 	Gui_ControlPanel.Opt("+OwnDialogs")
     if !ValidateSBDir(Gui_ControlPanel["SBDir"].Value) {
         Gui_ControlPanel["Tabs"].Choose(2) ; go to settings panel
-        MsgBox("Please browse Sanny Builder Root Directory first", "Invalid Sanny Builder Directory", 16)
+        MsgBox(
+            "Please browse Sanny Builder Root Directory first",
+            "Invalid Sanny Builder Directory",
+            4096 ; Always on top
+            + 16 ; Cross Icon
+            +  0 ; OK Button
+        )
         return
     }
         ; disable interation with the GUI
@@ -299,15 +440,23 @@ GUIProcessSourceCode(sourceCodePath) {
         ; initialize global variables
     Gui_ControlPanel["TargetPath"].Value := sourceCodePath
     Gui_ControlPanel["Warnings"].Value := ""
-    Gui_ControlPanel["ConvertedText"].Value := ""
+    Gui_ControlPanel["ConvertedText"].Text := ""
     gConvertedText[1] := ""
     gConvertedText[2] := ""
         ;
+        ; initialize local variables
+    highlightText := !useRichEdit ? false : Gui_ControlPanel["HighlightDetectedCommands"].Value
+        ;
     InitializeVariables(Gui_ControlPanel["SBDir"].Value, Gui_ControlPanel["Game"].Text)
-    Gui_ControlPanel["ConvertedText"].Value := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, Gui_ControlPanel["UseClass"].Value)
+    gConvertedText[Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, Gui_ControlPanel["UseClass"].Value, true, highlightText)
+    if useRichEdit {
+        SetConvertedRichTextControl()
+    } else {
+        Gui_ControlPanel["ConvertedText"].Text := gConvertedText[Gui_ControlPanel["UseClass"].Value + 1]
+    }
     Gui_ControlPanel.Opt("-Disabled") ; enable interation with the GUI except the operation buttons
         ; wait for the alternative converted text view to finish before reenabling the operation buttons
-    gConvertedText[!Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, !Gui_ControlPanel["UseClass"].Value)
+    gConvertedText[!Gui_ControlPanel["UseClass"].Value + 1] := ConvertSBToSBL(sourceCodePath, Gui_ControlPanel["Game"].Text, !Gui_ControlPanel["UseClass"].Value, false, highlightText)
         ; reenable operation buttons
     Gui_ControlPanel["UseClass"].Enabled := true
     Gui_ControlPanel["BrowseSC"].Enabled := true
@@ -359,7 +508,7 @@ CLIProcessSourceCode(inputSourceCode, sannyBuilderDirectory, targetGame, useClas
     useClass := (useClass == "") ? gSettings.UseClass : useClass ? true : false
 
     InitializeVariables(sannyBuilderDirectory, targetGame)
-    convertedText := ConvertSBToSBL(inputSourceCode, targetGame, useClass)
+    convertedText := ConvertSBToSBL(inputSourceCode, targetGame, useClass, false)
     if (convertedText == "") {
         ExitApp eEXITERRORCODES.ConversionFailed
     } else {
@@ -405,6 +554,8 @@ LoadSettings() {
         ["Games", "gta3|sa|vc"],
         ["Game", "2"],
         ["UseClass", "1"],
+        ["HighlightDetectedCommands", "1"],
+        ["UseClassicEdit", "0"],
         ["SBDir", ""] ] {
         settings.%el[1]% := IniRead(INIPATH, "General", el[1], "")
         if (settings.%el[1]% == "") and (el[2] != "") { ; key is undefined
@@ -569,14 +720,15 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
     predefinedDeclarations := Map()
         ; constants which doesn't require {$include}
     for , filePath in [RELATIVEPATHSIGN . "constants.txt", RELATIVEPATHSIGN . "enums.txt"] {
-        warning .= UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, false)
+        warning .= UpdatePredefinedDeclarations(predefinedDeclarations, filePath, workPath, false)
     }
         ; constants which requires {$include}
     if gSettings.ConstantsEnumsFilePaths[game] {
         Loop Parse gSettings.ConstantsEnumsFilePaths[game], "`n", " `t" {
-            warning .= UpdatePredefinedDeclarations(&predefinedDeclarations, A_LoopField, workPath, true)
+            warning .= UpdatePredefinedDeclarations(predefinedDeclarations, A_LoopField, workPath, true)
         }
     }
+        ; no need to verify invalid constants for now, we will process these invalid constants later
     
     predefinedKeywords := Map()
     parsedText := RELATIVEPATHSIGN . "keywords.txt"
@@ -615,7 +767,7 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
     }
 }
 
-ShowWarnings(warnings) {
+ShowWarnings(warnings, overwrite := false) {
     legend := ""
     for key in eWARNINGCODES {
         if InStr(warnings, key) {
@@ -625,7 +777,11 @@ ShowWarnings(warnings) {
     if legend {
         warnings .= "`n`n~~~Warning Descriptions~~~" . legend . "`n`nCheck this tool's Github Issue page for possible fixes."
     }
-    Gui_ControlPanel["Warnings"].Value .= warnings
+    if overwrite {
+        Gui_ControlPanel["Warnings"].Value := warnings
+    } else {
+        Gui_ControlPanel["Warnings"].Value .= warnings
+    }
 }
 
 GetParamsParseType(usedExtensions, opcode, params, &command) {
@@ -658,7 +814,7 @@ GetParamsParseType(usedExtensions, opcode, params, &command) {
     return ePARAMSPARSETYPE.Invalid
 }
 
-CheckAutoAssignedVariables(processedText, &declarationsMap) {
+CheckAutoAssignedVariables(declarationsMap, processedText) {
     for dataType in dataTypesMap {
         if !RegExMatch(processedText, "i)^" . dataType . "[ \t]+(.+)$", &value) {
             continue
@@ -667,53 +823,85 @@ CheckAutoAssignedVariables(processedText, &declarationsMap) {
             if RegExMatch(value, REGEXPARSEEQUALITY, &value) { ; contents of value were value[1] = value[2]
                 value := value[1]
             }
-            declarationsMap[value] := false ; declaration is a variable
+            declarationsMap[value] := {Value: "?", ValueType: 0} ; declaration is a variable, ? = autoassigned
         }
         return true ; processedText is an autoassigned variable declaration
     }
     return false ; processedText is not an autoassigned variable declaration
 }
 
-UpdateEnums(name, field, &declarationsMap, groupKey := "") {
+TraceDeclarationIndirectReference(declarationsMap, name) {
+    valueInfo := declarationsMap[name] ; initially evaluate our target declaration name
+        ; circular reference detection variables
+    originalValue := valueInfo.Value
+    isInitialIndirectCheck := true
+        ;
+    ReevaluateDeclaration:
+    ; valueType = 0 = variable
+    ; valueType = 1 = literal
+    ; valueType = 2 = invalid
+    if RegExMatch(valueInfo.Value, REGEXVARARRAY) {
+        ; declaration's value is a variable
+        if (valueInfo.ValueType != 0) { ; ValueType isn't correct, maybe previously invalid
+            valueInfo.ValueType := 0
+        }
+    } else if RegExMatch(valueInfo.Value, REGEXLITERALS) {
+        ; declaration's value is literal
+        if (valueInfo.ValueType != 1) { ; ValueType isn't correct, maybe previously invalid
+            valueInfo.ValueType := 1
+        }
+    } else  { ; try to retrieve the actual value(variable or literal) from multi-indirect declaration
+        if isInitialIndirectCheck or (originalValue != valueInfo.Value) { ; indirect declaration aren't performing a circular reference
+            isInitialIndirectCheck := false
+            if declarationsMap.Has(valueInfo.Value) { ; current declaration's value is equal to another declaration's value (indirect referencing)
+                valueInfo := declarationsMap[valueInfo.Value] ; dereference
+                goto ReevaluateDeclaration
+            }
+        }
+        ; declaration's value is invalid if it reaches here
+        if (valueInfo.ValueType != 2) { ; Make sure ValueType is invalid
+            valueInfo.ValueType := 2
+        }
+    }
+    if (declarationsMap[name] != valueInfo) { ; Was an indirect reference
+        declarationsMap[name] := valueInfo ; dereference
+    }
+}
+
+GetCorrectedDeclaration(declarationsMap, name) { ; get info while also trying to correct detected invalid values
+    if (declarationsMap[name] != 0) and (declarationsMap[name] != 1) { ; invalid valueType
+        ; try tracing if this declaration is variable or literal
+        TraceDeclarationIndirectReference(declarationsMap, name)
+    }
+    return declarationsMap[name]
+}
+
+UpdateEnums(declarationsMap, name, field) {
     if RegExMatch(field, REGEXLEFTHANDSIDE, &matchedText) {
         field := matchedText[1]
     }
     name := StrLower(name) . "." . StrLower(field)
-    if groupKey { ; store in a declaration group
-        declarationsMap[StrLower(groupKey)][name] := true ; enum's value is literal
-    } else { ; store in a declaration list
-        declarationsMap[name] := true ; enum's value is literal
-    }
+    declarationsMap[name] := {Value: "?", ValueType: 1} ; enum's value is literal, ? = autoassigned and we dont needed it
 }
 
-UpdateConstants(value, &declarationsMap, groupKey := "") {
+UpdateConstants(declarationsMap, value) {
     For value in StrSplit(value, ",", " `t") { ; parses each field separated by comma: c1 = literalconst, c2 = var2, c3 = c2
         if !RegExMatch(value, REGEXPARSEEQUALITY, &value) {
             continue
         }
-        leftHandSide := StrLower(value[1])
-        rightHandSide := StrLower(value[2])
-        ; add constant to our list of known declarations
-        ; value = 0 = variable
-        ; value = 1 = literal
-        if groupKey { ; store in a declaration group
-            declarationsMap[groupKey][leftHandSide] := !RegExMatch(rightHandSide, REGEXVARARRAY)
-        } else { ; store in a declaration list
-            if RegExMatch(rightHandSide, REGEXVARARRAY) {
-                declarationsMap[leftHandSide] := false ; constant's value is a variable
-                return
-            } else for constant in declarationsMap {
-                if (rightHandSide = constant) { ; constant's value is equal to another constant's value (case insensitive)
-                    declarationsMap[leftHandSide] := declarationsMap[constant]
-                    return
-                }
-            }
-            declarationsMap[leftHandSide] := true ; constant's value is literal
+        name := StrLower(value[1])
+        value := StrLower(value[2])
+        if declarationsMap.Has(name) {
+            declarationsMap[name].Value := value
+            declarationsMap[name].ValueType := 2
+        } else {
+            declarationsMap[name] := {Value: value, ValueType: 2}
         }
+        TraceDeclarationIndirectReference(declarationsMap, name)
     }
 }
 
-UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, requiresInclude := false) {
+UpdatePredefinedDeclarations(predefinedDeclarations, filePath, workPath, requiresInclude := false) {
         ; Remove Comments
     posL := InStr(filePath, DEFINITIONDELIMITER)
     if posL {
@@ -746,9 +934,9 @@ UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, requir
         }
         switch (parseMode) {
         Case ePARSEMODE.ConstField: ; Const ... End
-            UpdateConstants(textLine, &predefinedDeclarations, groupKey)
+            UpdateConstants(predefinedDeclarations[groupKey], textLine)
         Case ePARSEMODE.EnumField: ; Enum ... End
-            UpdateEnums(enumName, textLine, &predefinedDeclarations, groupKey)
+            UpdateEnums(predefinedDeclarations[groupKey], enumName, textLine)
         Default: ; Command
             if (textLine = "const") {
                 parseMode := ePARSEMODE.ConstField ; switch to parse const mode
@@ -756,7 +944,7 @@ UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, requir
                 parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
                 enumName := matchedText[1]
             } else if RegExMatch(textLine, REGEXPARSEMULTICONST, &matchedText) {
-                UpdateConstants(matchedText[1], &predefinedDeclarations, groupKey)
+                UpdateConstants(predefinedDeclarations[groupKey], matchedText[1])
             }
         }
     }
@@ -764,17 +952,28 @@ UpdatePredefinedDeclarations(&predefinedDeclarations, filePath, workPath, requir
     return ""
 }
 
-ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
+ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings := true, highlightText := false) {
+    global gHighlightedRegions
 
     try fileReader := FileOpen(inputFile, "r")
     catch {
         return ""
     }
 
-    lineCount := 0
+    REGEXCOMMANDSTARTINGBARRIER := "^(?:[ \t]*(?:if|then|else|while|until|" . REGEXALLCOMMENTS . "))*[ \t]*"
+    if highlightText {
+        gHighlightedRegions[preferClassSyntax + 1] := Map()
+    }
+    initialComment := "/*"
+                    .    "`r`n`tThis Source Code has been converted to SBL using:"
+                    .        "`r`n`t`tApplication: " . AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch
+                    .        "`r`n`t`tGame: " . targetGame
+                    .        "`r`n`t`tSBL Version: " . sblVersion
+                    . "`r`n*/`r`n`r`n"
+    StrReplace(initialComment, "`n", , , &lineCount)
+    lineCount++ ; if the code starts at the first line, then lineCount = 1 not 0
     convertedText := ""
     warning := ""
-    REGEXCOMMANDSTARTINGBARRIER := "^(?:[ \t]*(?:if|then|else|while|until|" . REGEXALLCOMMENTS . "))*[ \t]*"
     
     usedExtensions := Map()
     declarationsMap := Map()
@@ -784,7 +983,17 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
 
     parseMode := 0
     while !fileReader.AtEOF {
+        if highlightText {
+            parsedLineStatus := 0 ; initialize as no highlighting CFI = 0
+        }
         textLine := fileReader.ReadLine()
+            ; replace breaking changes into their sb4 counterpart
+        for , value in [["$player_actor", "$scplayer"], ["$player_char, $player1"]] {
+            if InStr(textLine, value[1]) {
+                textLine := StrReplace(textLine, value[1], value[2])
+            }
+        }
+            ;
         fromText := RegExReplace(textLine, "\/{2}.*") ; remove // comments
         if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
             usedExtensions["default"] := true
@@ -812,13 +1021,13 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                 if (processedText = "end") {
                     parseMode := ePARSEMODE.Command ; switch to parse command mode
                 } else {
-                    UpdateConstants(processedText, &declarationsMap)
+                    UpdateConstants(declarationsMap, processedText)
                 }
             Case ePARSEMODE.EnumField: ; Enum ... End
                 if (processedText = "end") {
                     parseMode := ePARSEMODE.Command ; switch to parse command mode
                 } else {
-                    UpdateEnums(enumName, processedText, &declarationsMap)
+                    UpdateEnums(declarationsMap, enumName, processedText)
                 }
             Case ePARSEMODE.OthersField: ; Var ... End , Hex ... End
                 if (processedText = "end") {
@@ -833,8 +1042,8 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                 } else if (processedText = "var") or (processedText = "hex") {
                     parseMode := ePARSEMODE.OthersField ; indicate that we are inside a parsing field that we aren't interested
                 } else if RegExMatch(processedText, REGEXPARSEMULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
-                    UpdateConstants(matchedText[1], &declarationsMap)
-                } else if CheckAutoAssignedVariables(processedText, &declarationsMap) { ; <datatype> var1, va2, ...
+                    UpdateConstants(declarationsMap, matchedText[1])
+                } else if CheckAutoAssignedVariables(declarationsMap, processedText) { ; <datatype> var1, va2, ...
                     ; declarationsMap now contains all the variables defined by this line
                 } else {
                         ; create array of params found at processedText
@@ -846,12 +1055,13 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                         if (SubStr(term, matchedText.Len(1)) == ":") {
                             continue ; do nothing if its an opcode
                         } else if RegExMatch(term, REGEXVARARRAY) {
-                            paramOrder.Push({Value: term, IsLiteral: false}) ; add var to list of params
+                            paramOrder.Push({Value: term, IndirectValue: term, IsLiteral: false}) ; add var to list of params
                         } else if RegExMatch(term, REGEXLITERALS) {
-                            paramOrder.Push({Value: term, IsLiteral: true}) ; add literal to list of params
-                        } else For key in declarationsMap {
-                            if RegExMatch(term, "i)^(" . StrReplace(key, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
-                                paramOrder.Push({Value: matchedText[1], IsLiteral: declarationsMap[key]})
+                            paramOrder.Push({Value: term, IndirectValue: term, IsLiteral: true}) ; add literal to list of params
+                        } else For constName in declarationsMap {
+                            if RegExMatch(term, "i)^(" . StrReplace(constName, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
+                                declaration := GetCorrectedDeclaration(declarationsMap, constName)
+                                paramOrder.Push({Value: matchedText[1], IndirectValue: declaration.Value, IsLiteral: declaration.ValueType})
                                 break
                             }
                         }
@@ -863,14 +1073,26 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                     if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
                         checkOpcode := ("0x" . matchedText[1]) + 0
                         if (GetParamsParseType(usedExtensions, checkOpcode, paramOrder, &command) == ePARAMSPARSETYPE.Invalid) {
-                            warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                            if printWarnings {
+                                warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                            }
+                            if highlightText {
+                                highlightedText := processedText
+                                parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
+                            }
                         }
                     } else for key in predefinedKeywords {
                         if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
                             if (GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder, &command) != ePARAMSPARSETYPE.Invalid) {
                                 break
                             } else {
-                                warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefinedKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                if printWarnings {
+                                    warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefinedKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                }
+                                if highlightText {
+                                    highlightedText := processedText
+                                    parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
+                                }
                             }
                         }
                     }
@@ -878,51 +1100,95 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                     
                     if IsObject(command) and (command.ParseType != ePARAMSPARSETYPE.Invalid) {
                             ; scm command to sbl command
-                        if command.SBL.Has("operator") {
-                                ; declare var type for each params
-                            index := 0
+                        if command.SBL.Has("operator") { ; is an command supports operator syntax
                             processedText := ""
-                            For key in ["input", "output"] {
-                                if !command.SBL.Has(key) or (command.SBL[key].Length <= 0) {
-                                    continue
-                                }
-                                For , key in command.SBL[key] {
-                                    index++
-                                    if !key.Has("type") or paramOrder[command.SCM.ParamOrder[index]].IsLiteral
-                                    or RegExMatch(paramOrder[command.SCM.ParamOrder[index]].Value, "[SsVv]$|@[SsVv]") {
+                            ; 1 param total does not need var declaration. So only use var declaration when 2 or 3 params in total.
+                            if (command.SBL["num_params"] <= 1) {
+                                useOpcodeSyntax := false
+                            } else {
+                                    ; create a map that enumerates all the variables that needs datatype declaration
+                                varMap := Map()
+                                index := 0
+                                For key in ["input", "output"] {
+                                    if !command.SBL.Has(key) or (command.SBL[key].Length <= 0) {
                                         continue
                                     }
-                                    processedText .= paramOrder[command.SCM.ParamOrder[index]].Value . ":" . key["type"] . ", "
+                                    For , key in command.SBL[key] {
+                                        index++
+                                        paramInfo := paramOrder[command.SCM.ParamOrder[index]]
+                                        if (paramInfo.IsLiteral == 2) { ; invalid literal number
+                                            if printWarnings {
+                                                warning .= "InvalidParameter: param=" paramInfo.Value " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                            }
+                                            if highlightText {
+                                                parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
+                                            }
+                                        }
+                                        if !key.Has("type")
+                                        or (paramInfo.IsLiteral == 1) ; is literal string. Variable Type needs declaration. We also declare the variables with invalid types just for user awareness in the generated code
+                                        or RegExMatch(paramInfo.Value, "[SsVv]\$|@[SsVv]") { ; this passed value is a string variable
+                                            continue
+                                        }
+                                        if varMap.Has(paramInfo.IndirectValue) { ; last parameter has the highest declaration priority overwriting the old ones
+                                            varMap[paramInfo.IndirectValue].Name := paramInfo.Value
+                                            varMap[paramInfo.IndirectValue].DataType := key["type"]
+                                        } else {
+                                            varMap[paramInfo.IndirectValue] := {Name: paramInfo.Value, DataType: key["type"]}
+                                        }
+                                    }
                                 }
-                            }
-                            if (processedText != "") {
-                                if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
-                                    ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
-                                    tmpr := matchedText[1] . matchedText[2]
-                                    textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
-                                    convertedText .= tmpr . "`r`n"
-                                    lineCount++
-                                    processedText := matchedText[1] . "`tvar " . Trim(processedText,", `t")
-                                } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
-                                    processedText := matchedText[1] . "var " . Trim(processedText,", `t")
+                                    ;
+                                    ; Enumerate our datatype declarations
+                                if (command.SBL["num_params"] == 2) and (varMap.Count == 1) {
+                                    useOpcodeSyntax := true
                                 } else {
-                                    processedText := "var " . Trim(processedText,", `t")
+                                    useOpcodeSyntax := false
+                                    for , varInfo in varMap {
+                                        if (A_Index > 1) {
+                                            processedText .= ", "
+                                        }
+                                        processedText .= varInfo.Name . ":" . varInfo.DataType
+                                    }
                                 }
-                                convertedText .= processedText . "`r`n"
-                                lineCount++
-                                processedText := ""
+                                    ;
+                                if (processedText != "") {
+                                    processedText := "var " . Trim(processedText,", `t")
+                                    if highlightText {
+                                        highlightedText := processedText
+                                    }
+                                    if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
+                                        ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
+                                        tmpr := matchedText[1] . matchedText[2]
+                                        convertedText .= tmpr . "`r`n"
+                                        lineCount++
+                                        textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
+                                        processedText := matchedText[1] . "`t" . processedText
+                                    } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
+                                        processedText := matchedText[1] . processedText
+                                    }
+                                    if highlightText {
+                                        ; highlight as var declaration (CFI = 3)
+                                        gHighlightedRegions[preferClassSyntax + 1][lineCount] := {Pos: InStr(processedText, highlightedText), Len: StrLen(highlightedText), CFI: (parsedLineStatus ? parsedLineStatus : 3)}
+                                    }
+                                    convertedText .= processedText . "`r`n"
+                                    lineCount++
+                                    processedText := ""
+                                }
                             }
-                                ;
+                            ; adding opcode at the beginning for operator commands still the alternative convention: outputs first, inputs last
+                            ; so it doesn't actually matter if we put opcode at the beginning or not, cuz the arrangement are the same
                             switch (command.SBL["num_params"]) {
                                 case 1:
                                     processedText := command.SBL["operator"] . paramOrder[1].Value
                                 case 2:
-                                    if (command.SBL.Has("output") and (command.SBL["output"].Length == 1)) {
-                                        processedText := paramOrder[command.SCM.ParamOrder[2]].Value
+                                    if (command.SBL.Has("output") and (command.SBL["output"].Length == 1)) { ; use input first output last ordering
+                                        processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
+                                                       . paramOrder[command.SCM.ParamOrder[2]].Value
                                                        . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
                                                        . paramOrder[command.SCM.ParamOrder[1]].Value
-                                    } else { ; 2 outputs or 2 inputs
-                                        processedText := paramOrder[command.SCM.ParamOrder[1]].Value
+                                    } else { ; 2 outputs or 2 inputs, therefore we don't need to reorder the parameters
+                                        processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
+                                                       . paramOrder[command.SCM.ParamOrder[1]].Value
                                                        . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
                                                        . paramOrder[command.SCM.ParamOrder[2]].Value
                                     }
@@ -1007,32 +1273,29 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false) {
                         }
                             ;
                         textLine := StrReplace(textLine, fromText, processedText)
+                        if highlightText {
+                            highlightedText := processedText
+                            if !parsedLineStatus { ; is unhighlighted
+                                parsedLineStatus := 1 ; highlight as succesful syntax replacement CFI = 1
+                            }
+                        }
                     }
                 }
             }
         }
-            ; replace breaking changes into their sb4 counterpart
-        for , value in [["$player_actor", "$scplayer"], ["$player_char, $player1"]] {
-            if InStr(textLine, value[1]) {
-                textLine := StrReplace(textLine, value[1], value[2])
-            }
+        if highlightText and parsedLineStatus {
+            ; highlight as var declaration (CFI = 3)
+            gHighlightedRegions[preferClassSyntax + 1][lineCount] := {Pos: InStr(textLine, highlightedText), Len: StrLen(highlightedText), CFI: parsedLineStatus}
         }
-            ;
         convertedText .= textLine . "`r`n"
         lineCount++
     }
-
-    if IsSet(Gui_ControlPanel) {
+    
+    if printWarnings and warning and IsSet(Gui_ControlPanel) {
         ShowWarnings(warning)
     }
     if convertedText {
-        convertedText := "/*"
-                       .    "`n`tThis Source Code has been converted to SBL using:"
-                       .        "`n`t`tApplication: " . AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch
-                       .        "`n`t`tGame: " . targetGame
-                       .        "`n`t`tSBL Version: " . sblVersion
-                       . "`n*/`n`n"
-                       . convertedText
+        convertedText := initialComment . convertedText
     }
     return convertedText
 }
