@@ -3,7 +3,7 @@
  * @Author: Aldrin John O. Manalansan (ajom)
  * @Email: aldrinjohnolaermanalansan@gmail.com
  * @Brief: Convert Source Codes from Legacy SB Syntax into SBL Syntax
- * @Last Update: April 6, 2025
+ * @Last Update: June 2, 2025
  */
 
 #Requires AutoHotkey v2
@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 0 }
+AppVersion := { Major: 1, Minor: 3, Patch: 1 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -32,6 +32,8 @@ EDITCTRLBACKGROUND := "1F1F1F" ; "1F1F1F" ; "303841"
 RELATIVEPATHSIGN := "\"
 DEFINITIONDELIMITER := "><"
 INIDELIMITER := "|#@$::$@#|"
+
+eVALUETYPE := {Variable: 0, Literal: 1, Invalid: 2}
 ePARSEMODE := {Command:0, ConstField: 1, EnumField: 2, OthersField: 3}
 ePARAMSPARSETYPE := {Invalid: 0, Normal: 1, OutputArgument: 2, InputArgument: 3}
 eEXITERRORCODES := {
@@ -47,7 +49,7 @@ eEXITERRORCODES := {
 eWARNINGCODES := Map(
     "OpenFileFailed", "File is missing or it's locked used by another process",
     "InvalidOpcode", "Used by Developers to detect problems",
-    "DetectParamsFailed", "Failed to detect all parameters of a command. Can be fixed by specifying the external constants file containing all constants used as a parameter of this command, at this Tool's Settings -> Constants/Enums Files.",
+    "DetectParamsFailed", "    Failed to detect all parameters of a command, or the command itself isn't provided by the list of {$USE} extensions. Can be fixed by:`n        1) Providing {$USE <command's extension>} code declaration.`n        2) Providing {$INCLUDE <constant parameter's filepath>} code declaration of all external constants file to resolve all unknown parameters specified for this command.`n        3) All {$INCLUDE} filepaths must specified as well at this Tool's Settings -> Constants/Enums Files.",
     "InvalidParameter", "A detected parameter from a command might be causing a syntax error in Sanny Builder. Check its value if it's an Unknown Reference, or is causing Circular Referencing",
     "PropMissing", "A command in SBL's json file has a certain property that is missing. Used by Developers to detect problems.",
     "UnequalParams", "A command in SBL's json file has unequal parameter count. Used by Developers to detect problems.",
@@ -62,8 +64,10 @@ REGEXAVOIDBODYCOMMENTS     := "(?:[ \t]*(?:" . REGEXBOUNDEDCOMMENT . "))*"
 ;REGEXENDOFWORD := "(?:[ \t]|$)"
 REGEXIGNOREINICOMMENTS := "^[ \t]*[^;#\/]*[ \t]*"
 REGEXLEFTHANDSIDE := "^(\w+?)[ \t]*="
-REGEXPARSEEQUALITY := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
-REGEXPARSEMULTICONST := "i)^const[ \t]+(.*)$"
+REGEX_PARSE_EQUALITY := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
+REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT := "(\w+)[ \t]*=[ \t]*([\w@$(),\[\]]+)[ \t]*(?:,|$)"
+REGEX_PARSE_INLINEDDECLARATIONS_AUTOASSIGNEDVARIABLE := "(\w+[ \t]*=[ \t]*[\w@$(),\[\]]+)[ \t]*(?:,|$)"
+REGEX_PARSE_MULTICONST := "i)^const[ \t]+(.*)$"
 REGEXENUMNAME := "i)^enum[ \t]+(.+)$"
 REGEXOPTIONALARRAY := "(?:\[.+?\]|\(.+?,.+?\))?"
 REGEXLVAR := "\d+?@[SsVv]?" ; Local Variable
@@ -710,8 +714,9 @@ InitializeVariables(sannyBuilderDir, game, ignoreDuplicateKeywords := true, igno
             }
             scmCommandsMap[extensionName][opcode] := {ParamCount: matchedText[2], ParamOrder: Map()}
             posL := 1
-            while RegExMatch(matchedText[3], "%(\d+)", &orderMatch, posL) {
-                posL := orderMatch.Pos(1) + orderMatch.Len(1)
+            while (posL := RegExMatch(matchedText[3], "%(\d+)", &orderMatch, posL)) {
+                posL += orderMatch.Len
+
                 scmCommandsMap[extensionName][opcode].ParamOrder[orderMatch[1] + 0] := scmCommandsMap[extensionName][opcode].ParamOrder.Count + 1
             }
         }
@@ -784,50 +789,71 @@ ShowWarnings(warnings, overwrite := false) {
     }
 }
 
-GetParamsParseType(usedExtensions, opcode, params, &command) {
+ProcessParamsParseType(extension, opcode, params, isLogicNot) {
+    scmCommand := scmCommandsMap[extension][opcode]
+    sblCommand := sblCommandsMap[extension][opcode]
+    if sblCommand.Has("output") and sblCommand["output"][sblCommand["output"].Length].Has("type")
+    and (sblCommand["output"][sblCommand["output"].Length]["type"] == "arguments") {
+        return {ParseType: ePARAMSPARSETYPE.OutputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+    } else if sblCommand.Has("input") and sblCommand["input"][sblCommand["input"].Length].Has("type")
+    and (sblCommand["input"][sblCommand["input"].Length]["type"] == "arguments") {
+        return {ParseType: ePARAMSPARSETYPE.InputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+    } else if (params.Length == sblCommand["num_params"]) {
+        return {ParseType: ePARAMSPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
+    }
+    if (opcode == 0x0AB9) {
+        val := true
+    }
+}
+
+GetParamsParseType(usedExtensions, opcode, params) {
     if (opcode >= 0x8000) {
         isLogicNot := true
         opcode &= 0x7FFF ; flip the not bit
     } else {
         isLogicNot := false
     }
-    for extension in usedExtensions {
-        if !scmCommandsMap.Has(extension) or !scmCommandsMap[extension].Has(opcode)
-        or !sblCommandsMap.Has(extension) or !sblCommandsMap[extension].Has(opcode) or !sblCommandsMap[extension][opcode].Has("num_params") {
-            continue
-        }
-        scmCommand := scmCommandsMap[extension][opcode]
-        sblCommand := sblCommandsMap[extension][opcode]
-        if sblCommand.Has("output") and sblCommand["output"][sblCommand["output"].Length].Has("type")
-        and (sblCommand["output"][sblCommand["output"].Length]["type"] == "arguments") {
-            command := {ParseType: ePARAMSPARSETYPE.OutputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
-            return ePARAMSPARSETYPE.OutputArgument
-        } else if sblCommand.Has("input") and sblCommand["input"][sblCommand["input"].Length].Has("type")
-        and (sblCommand["input"][sblCommand["input"].Length]["type"] == "arguments") {
-            command := {ParseType: ePARAMSPARSETYPE.InputArgument, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
-            return ePARAMSPARSETYPE.InputArgument
-        } else if (params.Length == sblCommand["num_params"]) {
-            command := {ParseType: ePARAMSPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
-            return ePARAMSPARSETYPE.Normal
+    variantsCount := 0
+    for key, extension in sblCommandsMap {
+        if extension.Has(opcode) {
+            variantsCount++
+            extensionName := key
         }
     }
-    return ePARAMSPARSETYPE.Invalid
+    if (variantsCount == 0) {
+        return ; invalid opcode
+    } else if (variantsCount == 1) { ; this opcode is unique
+        return ProcessParamsParseType(extensionName, opcode, params, isLogicNot)
+    } else for extensionName in usedExtensions { ; we strictly require {$USE <extension>}
+        if !scmCommandsMap.Has(extensionName) or !scmCommandsMap[extensionName].Has(opcode)
+        or !sblCommandsMap.Has(extensionName) or !sblCommandsMap[extensionName].Has(opcode) or !sblCommandsMap[extensionName][opcode].Has("num_params") {
+            continue ; this variant is not compatible for our opcode
+        }
+        if IsObject(command := ProcessParamsParseType(extensionName, opcode, params, isLogicNot)) {
+            return command
+        }
+    }
 }
 
-CheckAutoAssignedVariables(declarationsMap, processedText) {
-    for dataType in dataTypesMap {
-        if !RegExMatch(processedText, "i)^" . dataType . "[ \t]+(.+)$", &value) {
-            continue
-        } ; line is an Auto Assigned Variables declaration
-        For value in StrSplit(value[1], ",", " `t") { ; parses each field separated by comma: dVar1 = 3, dVar2, dVar3 = dVar1, dVar4 = var
-            if RegExMatch(value, REGEXPARSEEQUALITY, &value) { ; contents of value were value[1] = value[2]
-                value := value[1]
-            }
-            declarationsMap[value] := {Value: "?", ValueType: 0} ; declaration is a variable, ? = autoassigned
-        }
-        return true ; processedText is an autoassigned variable declaration
+CheckAutoAssignedVariables(declarationsMap, inlinedDeclarations) {
+    if !RegExMatch(inlinedDeclarations, "(.+?)[ \t]+(.+)$", &inlinedDeclarations) ; datatype name was not detected
+    or !dataTypesMap.Has(inlinedDeclarations[1]) { ; invalid datatype
+        return false ; invalid declaration
     }
-    return false ; processedText is not an autoassigned variable declaration
+    inlinedDeclarations := inlinedDeclarations[2]
+    ; parses each field separated by comma: dVar1 = 3, dVar2, dVar3 = dVar1, dVar4 = var
+    pos := 1
+    while (pos := RegExMatch(inlinedDeclarations, REGEX_PARSE_INLINEDDECLARATIONS_AUTOASSIGNEDVARIABLE, &value, pos)) {
+        pos += value.Len
+
+        value := value[1]
+        if RegExMatch(value, REGEX_PARSE_EQUALITY, &equation) { ; parses value[1] as "equation[1] = equation[2]"
+            declarationsMap[equation[1]] := {Value: equation[2], ValueType: eVALUETYPE.Variable}
+        } else {
+            declarationsMap[value] := {Value: "?", ValueType: eVALUETYPE.Variable} ; declaration is a variable, ? = autoassigned
+        }
+    }
+    return true
 }
 
 TraceDeclarationIndirectReference(declarationsMap, name) {
@@ -842,13 +868,13 @@ TraceDeclarationIndirectReference(declarationsMap, name) {
     ; valueType = 2 = invalid
     if RegExMatch(valueInfo.Value, REGEXVARARRAY) {
         ; declaration's value is a variable
-        if (valueInfo.ValueType != 0) { ; ValueType isn't correct, maybe previously invalid
-            valueInfo.ValueType := 0
+        if (valueInfo.ValueType != eVALUETYPE.Variable) { ; ValueType isn't correct, maybe previously invalid
+            valueInfo.ValueType := eVALUETYPE.Variable
         }
     } else if RegExMatch(valueInfo.Value, REGEXLITERALS) {
         ; declaration's value is literal
-        if (valueInfo.ValueType != 1) { ; ValueType isn't correct, maybe previously invalid
-            valueInfo.ValueType := 1
+        if (valueInfo.ValueType != eVALUETYPE.Literal) { ; ValueType isn't correct, maybe previously invalid
+            valueInfo.ValueType := eVALUETYPE.Literal
         }
     } else  { ; try to retrieve the actual value(variable or literal) from multi-indirect declaration
         if isInitialIndirectCheck or (originalValue != valueInfo.Value) { ; indirect declaration aren't performing a circular reference
@@ -859,8 +885,8 @@ TraceDeclarationIndirectReference(declarationsMap, name) {
             }
         }
         ; declaration's value is invalid if it reaches here
-        if (valueInfo.ValueType != 2) { ; Make sure ValueType is invalid
-            valueInfo.ValueType := 2
+        if (valueInfo.ValueType != eVALUETYPE.Invalid) { ; Make sure ValueType is invalid
+            valueInfo.ValueType := eVALUETYPE.Invalid
         }
     }
     if (declarationsMap[name] != valueInfo) { ; Was an indirect reference
@@ -869,7 +895,7 @@ TraceDeclarationIndirectReference(declarationsMap, name) {
 }
 
 GetCorrectedDeclaration(declarationsMap, name) { ; get info while also trying to correct detected invalid values
-    if (declarationsMap[name] != 0) and (declarationsMap[name] != 1) { ; invalid valueType
+    if (declarationsMap[name].ValueType == eVALUETYPE.Invalid) { ; invalid valueType
         ; try tracing if this declaration is variable or literal
         TraceDeclarationIndirectReference(declarationsMap, name)
     }
@@ -881,21 +907,22 @@ UpdateEnums(declarationsMap, name, field) {
         field := matchedText[1]
     }
     name := StrLower(name) . "." . StrLower(field)
-    declarationsMap[name] := {Value: "?", ValueType: 1} ; enum's value is literal, ? = autoassigned and we dont needed it
+    declarationsMap[name] := {Value: "?", ValueType: eVALUETYPE.Literal} ; enum's value is literal, ? = autoassigned and we dont needed it
 }
 
-UpdateConstants(declarationsMap, value) {
-    For value in StrSplit(value, ",", " `t") { ; parses each field separated by comma: c1 = literalconst, c2 = var2, c3 = c2
-        if !RegExMatch(value, REGEXPARSEEQUALITY, &value) {
-            continue
-        }
+UpdateConstants(declarationsMap, inlinedDeclarations) {
+    ; parses each field separated by comma: c1 = literalconst, c2 = var2, c3 = c2
+    pos := 1
+    while (pos := RegExMatch(inlinedDeclarations, REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT, &value, pos)) {
+        pos += value.Len
+
         name := StrLower(value[1])
         value := StrLower(value[2])
         if declarationsMap.Has(name) {
             declarationsMap[name].Value := value
-            declarationsMap[name].ValueType := 2
+            declarationsMap[name].ValueType := eVALUETYPE.Invalid
         } else {
-            declarationsMap[name] := {Value: value, ValueType: 2}
+            declarationsMap[name] := {Value: value, ValueType: eVALUETYPE.Invalid}
         }
         TraceDeclarationIndirectReference(declarationsMap, name)
     }
@@ -943,7 +970,7 @@ UpdatePredefinedDeclarations(predefinedDeclarations, filePath, workPath, require
             } else if RegExMatch(textLine, REGEXENUMNAME, &matchedText) {
                 parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
                 enumName := matchedText[1]
-            } else if RegExMatch(textLine, REGEXPARSEMULTICONST, &matchedText) {
+            } else if RegExMatch(textLine, REGEX_PARSE_MULTICONST, &matchedText) {
                 UpdateConstants(predefinedDeclarations[groupKey], matchedText[1])
             }
         }
@@ -1011,7 +1038,12 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                     }
                 }
             }
-        } else if RegExMatch(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER . "(.+?)" . REGEXCOMMENTSANDSPACES . "$", &fromText) {
+        } else if RegExMatch(
+            ; remove control-flow commands(if, then, else, while, etc...) to prevent evaluating them as a command
+            RegExReplace(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER),
+            "(.+?)" . REGEXCOMMENTSANDSPACES . "$",
+            &fromText
+        ) {
             ; textLine is suspected as a command (case insensitive)
             fromText := Trim(fromText[1])
             processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
@@ -1041,7 +1073,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                     enumName := matchedText[1]
                 } else if (processedText = "var") or (processedText = "hex") {
                     parseMode := ePARSEMODE.OthersField ; indicate that we are inside a parsing field that we aren't interested
-                } else if RegExMatch(processedText, REGEXPARSEMULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
+                } else if RegExMatch(processedText, REGEX_PARSE_MULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
                     UpdateConstants(declarationsMap, matchedText[1])
                 } else if CheckAutoAssignedVariables(declarationsMap, processedText) { ; <datatype> var1, va2, ...
                     ; declarationsMap now contains all the variables defined by this line
@@ -1050,18 +1082,19 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                     paramOrder := Array()
                     pos := 1
                     while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
-                        pos := matchedText.Pos(1) + matchedText.Len(1) ; update regex startinig position
+                        pos := matchedText.Pos(1) + matchedText.Len(1)
+
                         term := matchedText[1]
                         if (SubStr(term, matchedText.Len(1)) == ":") {
                             continue ; do nothing if its an opcode
                         } else if RegExMatch(term, REGEXVARARRAY) {
-                            paramOrder.Push({Value: term, IndirectValue: term, IsLiteral: false}) ; add var to list of params
+                            paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Variable}) ; add var to list of params
                         } else if RegExMatch(term, REGEXLITERALS) {
-                            paramOrder.Push({Value: term, IndirectValue: term, IsLiteral: true}) ; add literal to list of params
+                            paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Literal}) ; add literal to list of params
                         } else For constName in declarationsMap {
                             if RegExMatch(term, "i)^(" . StrReplace(constName, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
                                 declaration := GetCorrectedDeclaration(declarationsMap, constName)
-                                paramOrder.Push({Value: matchedText[1], IndirectValue: declaration.Value, IsLiteral: declaration.ValueType})
+                                paramOrder.Push({Value: matchedText[1], IndirectValue: declaration.Value, ValueType: declaration.ValueType})
                                 break
                             }
                         }
@@ -1072,7 +1105,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                     command := ""
                     if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
                         checkOpcode := ("0x" . matchedText[1]) + 0
-                        if (GetParamsParseType(usedExtensions, checkOpcode, paramOrder, &command) == ePARAMSPARSETYPE.Invalid) {
+                        if !IsObject(command := GetParamsParseType(usedExtensions, checkOpcode, paramOrder)) {
                             if printWarnings {
                                 warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
                             }
@@ -1083,7 +1116,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                         }
                     } else for key in predefinedKeywords {
                         if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
-                            if (GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder, &command) != ePARAMSPARSETYPE.Invalid) {
+                            if IsObject(command := GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder)) {
                                 break
                             } else {
                                 if printWarnings {
@@ -1116,7 +1149,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                                     For , key in command.SBL[key] {
                                         index++
                                         paramInfo := paramOrder[command.SCM.ParamOrder[index]]
-                                        if (paramInfo.IsLiteral == 2) { ; invalid literal number
+                                        if (paramInfo.ValueType == eVALUETYPE.Invalid) { ; invalid type
                                             if printWarnings {
                                                 warning .= "InvalidParameter: param=" paramInfo.Value " line=" . lineCount . " text=<<<" textLine ">>>`n"
                                             }
@@ -1125,7 +1158,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                                             }
                                         }
                                         if !key.Has("type")
-                                        or (paramInfo.IsLiteral == 1) ; is literal string. Variable Type needs declaration. We also declare the variables with invalid types just for user awareness in the generated code
+                                        or (paramInfo.ValueType == eVALUETYPE.Literal) ; is literal string. Variable Type needs declaration. We also declare the variables with invalid types just for user awareness in the generated code
                                         or RegExMatch(paramInfo.Value, "[SsVv]\$|@[SsVv]") { ; this passed value is a string variable
                                             continue
                                         }
@@ -1232,7 +1265,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                                 paramHasLiteralValue := false
                                 Loop iterations {
                                     loopIndex++
-                                    if paramOrder[(loopIndex <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[loopIndex] : loopIndex].IsLiteral {
+                                    if paramOrder[(loopIndex <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[loopIndex] : loopIndex].ValueType {
                                         paramHasLiteralValue := true
                                         break
                                     }
