@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 1 }
+AppVersion := { Major: 1, Minor: 3, Patch: 2 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -1015,7 +1015,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
         }
         textLine := fileReader.ReadLine()
             ; replace breaking changes into their sb4 counterpart
-        for , value in [["$player_actor", "$scplayer"], ["$player_char, $player1"]] {
+        for , value in [["$player_actor", "$scplayer"], ["$player_char", "$player1"]] {
             if InStr(textLine, value[1]) {
                 textLine := StrReplace(textLine, value[1], value[2])
             }
