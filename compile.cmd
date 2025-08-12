@@ -23,3 +23,5 @@ if not exist "%~dp0Compiled\x64" (
 "%ahkPath%\Compiler\Ahk2Exe.exe" /in "%~dp0%appName%.ahk2" /out "%~dp0Compiled\x64\%appName%.exe" /icon "%~dp0icon.png" /base "%ahkPath%\v2\AutoHotkey64.exe" /compress %compressType%
 
 7z a "%~dp0Compiled\%appName%" "%~dp0Compiled\*"
+7z a "%~dp0Compiled\x86_%appName%" "%~dp0Compiled\x86\%appName%.exe"
+7z a "%~dp0Compiled\x64_%appName%" "%~dp0Compiled\x64\%appName%.exe"

@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 2 }
+AppVersion := { Major: 1, Minor: 3, Patch: 3 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -950,7 +950,7 @@ UpdatePredefinedDeclarations(predefinedDeclarations, filePath, workPath, require
         predefinedDeclarations[groupKey] := Map()
     }
 
-    parseMode := 0
+    parseMode := ePARSEMODE.Command
     while !fileObj.AtEOF {
         textLine := Trim(RegExReplace(fileObj.ReadLine(), REGEXALLCOMMENTS)) ; remove all comments then remove leading and trailing whitespaces
         if (textLine == "") {
@@ -1008,7 +1008,8 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
         declarationsMap[key] := predefinedDeclarations[DEFINITIONDELIMITER][key]
     }
 
-    parseMode := 0
+    isMultilineComment := false
+    parseMode := ePARSEMODE.Command
     while !fileReader.AtEOF {
         if highlightText {
             parsedLineStatus := 0 ; initialize as no highlighting CFI = 0
@@ -1020,259 +1021,241 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                 textLine := StrReplace(textLine, value[1], value[2])
             }
         }
-            ;
         fromText := RegExReplace(textLine, "\/{2}.*") ; remove // comments
-        if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
-            usedExtensions["default"] := true
-            usedExtensions["cleo"] := true
-        } else if RegExMatch(fromText, "i){[\t ]*\$(USE|I(?:NCLUDE(?:_ONCE)*)*)[\t ]+(.+?)[\t ]*}", &matchedText) { ; encountered $USE directive
-            For key in StrSplit(matchedText[2], ",", " `t") {
-                key := StrLower(key)
-                if (matchedText[1] = "USE") { ; case insensistive
-                    if scmCommandsMap.Has(key) and sblCommandsMap.Has(key) {
-                        usedExtensions[key] := true
-                    }
-                } else if predefinedDeclarations.Has(key) { ; process includes
-                    for field in predefinedDeclarations[key] { ; add all the constants of this included file to our list of known constants
-                        declarationsMap[field] := predefinedDeclarations[key][field]
-                    }
-                }
+            ;
+            ; Process MultiLine Comments
+        if isMultilineComment {
+            if InStr(fromText, "*/") {
+                isMultilineComment := false ; multiline comment ends here
+                ; remove the remnants of the remaining part of the multiline comment
+                fromText := RegExReplace(fromText, ".*?\*\/")
             }
-        } else if RegExMatch(
-            ; remove control-flow commands(if, then, else, while, etc...) to prevent evaluating them as a command
-            RegExReplace(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER),
-            "(.+?)" . REGEXCOMMENTSANDSPACES . "$",
-            &fromText
-        ) {
-            ; textLine is suspected as a command (case insensitive)
-            fromText := Trim(fromText[1])
-            processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
-
-            switch (parseMode) {
-            Case ePARSEMODE.ConstField: ; Const ... End
-                if (processedText = "end") {
-                    parseMode := ePARSEMODE.Command ; switch to parse command mode
-                } else {
-                    UpdateConstants(declarationsMap, processedText)
-                }
-            Case ePARSEMODE.EnumField: ; Enum ... End
-                if (processedText = "end") {
-                    parseMode := ePARSEMODE.Command ; switch to parse command mode
-                } else {
-                    UpdateEnums(declarationsMap, enumName, processedText)
-                }
-            Case ePARSEMODE.OthersField: ; Var ... End , Hex ... End
-                if (processedText = "end") {
-                    parseMode := ePARSEMODE.Command ; switch to parse command mode
-                }
-            Default: ; Command
-                if (processedText = "const") {
-                    parseMode := ePARSEMODE.ConstField ; switch to parse const mode
-                } else if RegExMatch(processedText, REGEXENUMNAME, &matchedText) {
-                    parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
-                    enumName := matchedText[1]
-                } else if (processedText = "var") or (processedText = "hex") {
-                    parseMode := ePARSEMODE.OthersField ; indicate that we are inside a parsing field that we aren't interested
-                } else if RegExMatch(processedText, REGEX_PARSE_MULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
-                    UpdateConstants(declarationsMap, matchedText[1])
-                } else if CheckAutoAssignedVariables(declarationsMap, processedText) { ; <datatype> var1, va2, ...
-                    ; declarationsMap now contains all the variables defined by this line
-                } else {
-                        ; create array of params found at processedText
-                    paramOrder := Array()
-                    pos := 1
-                    while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
-                        pos := matchedText.Pos(1) + matchedText.Len(1)
-
-                        term := matchedText[1]
-                        if (SubStr(term, matchedText.Len(1)) == ":") {
-                            continue ; do nothing if its an opcode
-                        } else if RegExMatch(term, REGEXVARARRAY) {
-                            paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Variable}) ; add var to list of params
-                        } else if RegExMatch(term, REGEXLITERALS) {
-                            paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Literal}) ; add literal to list of params
-                        } else For constName in declarationsMap {
-                            if RegExMatch(term, "i)^(" . StrReplace(constName, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
-                                declaration := GetCorrectedDeclaration(declarationsMap, constName)
-                                paramOrder.Push({Value: matchedText[1], IndirectValue: declaration.Value, ValueType: declaration.ValueType})
-                                break
-                            }
+        } else {
+            if (pos := InStr(fromText, "/*", true, -1)) and !InStr(fromText, "*/", true, pos + 2) {
+                isMultilineComment := true
+                fromText := RegExReplace(fromText, "\/\*.*")
+            }
+            
+            if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
+                usedExtensions["default"] := true
+                usedExtensions["cleo"] := true
+            } else if RegExMatch(fromText, "i){[\t ]*\$(USE|I(?:NCLUDE(?:_ONCE)*)*)[\t ]+(.+?)[\t ]*}", &matchedText) { ; encountered $USE directive
+                For key in StrSplit(matchedText[2], ",", " `t") {
+                    key := StrLower(key)
+                    if (matchedText[1] = "USE") { ; case insensistive
+                        if scmCommandsMap.Has(key) and sblCommandsMap.Has(key) {
+                            usedExtensions[key] := true
+                        }
+                    } else if predefinedDeclarations.Has(key) { ; process includes
+                        for field in predefinedDeclarations[key] { ; add all the constants of this included file to our list of known constants
+                            declarationsMap[field] := predefinedDeclarations[key][field]
                         }
                     }
-                        ;
-                    
-                        ; get the opcode and its information that is compatible with the number of detected parameters
-                    command := ""
-                    if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
-                        checkOpcode := ("0x" . matchedText[1]) + 0
-                        if !IsObject(command := GetParamsParseType(usedExtensions, checkOpcode, paramOrder)) {
-                            if printWarnings {
-                                warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
-                            }
-                            if highlightText {
-                                highlightedText := processedText
-                                parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
+                }
+            } else if RegExMatch(
+                ; remove control-flow commands(if, then, else, while, etc...) to prevent evaluating them as a command
+                RegExReplace(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER),
+                "(.+?)" . REGEXCOMMENTSANDSPACES . "$",
+                &fromText
+            ) {
+                ; textLine is suspected as a command (case insensitive)
+                fromText := Trim(fromText[1])
+                processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
+                switch (parseMode) {
+                Case ePARSEMODE.ConstField: ; Const ... End
+                    if (processedText = "end") {
+                        parseMode := ePARSEMODE.Command ; switch to parse command mode
+                    } else {
+                        UpdateConstants(declarationsMap, processedText)
+                    }
+                Case ePARSEMODE.EnumField: ; Enum ... End
+                    if (processedText = "end") {
+                        parseMode := ePARSEMODE.Command ; switch to parse command mode
+                    } else {
+                        UpdateEnums(declarationsMap, enumName, processedText)
+                    }
+                Case ePARSEMODE.OthersField: ; Var ... End , Hex ... End
+                    if (processedText = "end") {
+                        parseMode := ePARSEMODE.Command ; switch to parse command mode
+                    }
+                Default: ; Command
+                    if (processedText = "const") {
+                        parseMode := ePARSEMODE.ConstField ; switch to parse const mode
+                    } else if RegExMatch(processedText, REGEXENUMNAME, &matchedText) {
+                        parseMode := ePARSEMODE.EnumField ; switch to parse enum mode
+                        enumName := matchedText[1]
+                    } else if (processedText = "var") or (processedText = "hex") {
+                        parseMode := ePARSEMODE.OthersField ; indicate that we are inside a parsing field that we aren't interested
+                    } else if RegExMatch(processedText, REGEX_PARSE_MULTICONST, &matchedText) { ; const c1 = literalconst, c2 = var2, c3 = c2, ..., ...
+                        UpdateConstants(declarationsMap, matchedText[1])
+                    } else if CheckAutoAssignedVariables(declarationsMap, processedText) { ; <datatype> var1, va2, ...
+                        ; declarationsMap now contains all the variables defined by this line
+                    } else {
+                            ; create array of params found at processedText
+                        paramOrder := Array()
+                        pos := 1
+                        while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
+                            pos := matchedText.Pos(1) + matchedText.Len(1)
+
+                            term := matchedText[1]
+                            if (SubStr(term, matchedText.Len(1)) == ":") {
+                                continue ; do nothing if its an opcode
+                            } else if RegExMatch(term, REGEXVARARRAY) {
+                                paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Variable}) ; add var to list of params
+                            } else if RegExMatch(term, REGEXLITERALS) {
+                                paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Literal}) ; add literal to list of params
+                            } else For constName in declarationsMap {
+                                if RegExMatch(term, "i)^(" . StrReplace(constName, ".", "\.") . ")" . REGEXOPTIONALARRAY . "$", &matchedText) { ; term is a constant (case insensitive)
+                                    declaration := GetCorrectedDeclaration(declarationsMap, constName)
+                                    paramOrder.Push({Value: matchedText[1], IndirectValue: declaration.Value, ValueType: declaration.ValueType})
+                                    break
+                                }
                             }
                         }
-                    } else for key in predefinedKeywords {
-                        if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
-                            if IsObject(command := GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder)) {
-                                break
-                            } else {
+                            ;
+                        
+                            ; get the opcode and its information that is compatible with the number of detected parameters
+                        command := ""
+                        if RegExMatch(processedText, "([[:xdigit:]]{4}):", &matchedText) {
+                            checkOpcode := ("0x" . matchedText[1]) + 0
+                            if !IsObject(command := GetParamsParseType(usedExtensions, checkOpcode, paramOrder)) {
                                 if printWarnings {
-                                    warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefinedKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                    warning .= "DetectParamsFailed: Opcode=" . Format("{:04X}", checkOpcode) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
                                 }
                                 if highlightText {
                                     highlightedText := processedText
                                     parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
                                 }
                             }
-                        }
-                    }
-                        ;
-                    
-                    if IsObject(command) and (command.ParseType != ePARAMSPARSETYPE.Invalid) {
-                            ; scm command to sbl command
-                        if command.SBL.Has("operator") { ; is an command supports operator syntax
-                            processedText := ""
-                            ; 1 param total does not need var declaration. So only use var declaration when 2 or 3 params in total.
-                            if (command.SBL["num_params"] <= 1) {
-                                useOpcodeSyntax := false
-                            } else {
-                                    ; create a map that enumerates all the variables that needs datatype declaration
-                                varMap := Map()
-                                index := 0
-                                For key in ["input", "output"] {
-                                    if !command.SBL.Has(key) or (command.SBL[key].Length <= 0) {
-                                        continue
-                                    }
-                                    For , key in command.SBL[key] {
-                                        index++
-                                        paramInfo := paramOrder[command.SCM.ParamOrder[index]]
-                                        if (paramInfo.ValueType == eVALUETYPE.Invalid) { ; invalid type
-                                            if printWarnings {
-                                                warning .= "InvalidParameter: param=" paramInfo.Value " line=" . lineCount . " text=<<<" textLine ">>>`n"
-                                            }
-                                            if highlightText {
-                                                parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
-                                            }
-                                        }
-                                        if !key.Has("type")
-                                        or (paramInfo.ValueType == eVALUETYPE.Literal) ; is literal string. Variable Type needs declaration. We also declare the variables with invalid types just for user awareness in the generated code
-                                        or RegExMatch(paramInfo.Value, "[SsVv]\$|@[SsVv]") { ; this passed value is a string variable
-                                            continue
-                                        }
-                                        if varMap.Has(paramInfo.IndirectValue) { ; last parameter has the highest declaration priority overwriting the old ones
-                                            varMap[paramInfo.IndirectValue].Name := paramInfo.Value
-                                            varMap[paramInfo.IndirectValue].DataType := key["type"]
-                                        } else {
-                                            varMap[paramInfo.IndirectValue] := {Name: paramInfo.Value, DataType: key["type"]}
-                                        }
-                                    }
-                                }
-                                    ;
-                                    ; Enumerate our datatype declarations
-                                if (command.SBL["num_params"] == 2) and (varMap.Count == 1) {
-                                    useOpcodeSyntax := true
+                        } else for key in predefinedKeywords {
+                            if RegExMatch(processedText, "i)(?:^|[\t ]+)" . key . "(?:[\t ]+|$)") { ; keyword is used instead of opcode (case-insensitive)
+                                if IsObject(command := GetParamsParseType(usedExtensions, predefinedKeywords[key], paramOrder)) {
+                                    break
                                 } else {
-                                    useOpcodeSyntax := false
-                                    for , varInfo in varMap {
-                                        if (A_Index > 1) {
-                                            processedText .= ", "
-                                        }
-                                        processedText .= varInfo.Name . ":" . varInfo.DataType
+                                    if printWarnings {
+                                        warning .= "DetectParamsFailed: keyword=" . key . " Opcode=" . Format("{:04X}", predefinedKeywords[key]) . " line=" . lineCount . " text=<<<" textLine ">>>`n"
                                     }
-                                }
-                                    ;
-                                if (processedText != "") {
-                                    processedText := "var " . Trim(processedText,", `t")
                                     if highlightText {
                                         highlightedText := processedText
+                                        parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
                                     }
-                                    if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
-                                        ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
-                                        tmpr := matchedText[1] . matchedText[2]
-                                        convertedText .= tmpr . "`r`n"
+                                }
+                            }
+                        }
+                            ;
+                        
+                        if IsObject(command) and (command.ParseType != ePARAMSPARSETYPE.Invalid) {
+                                ; scm command to sbl command
+                            if command.SBL.Has("operator") { ; is an command supports operator syntax
+                                processedText := ""
+                                ; 1 param total does not need var declaration. So only use var declaration when 2 or 3 params in total.
+                                if (command.SBL["num_params"] <= 1) {
+                                    useOpcodeSyntax := false
+                                } else {
+                                        ; create a map that enumerates all the variables that needs datatype declaration
+                                    varMap := Map()
+                                    index := 0
+                                    For key in ["input", "output"] {
+                                        if !command.SBL.Has(key) or (command.SBL[key].Length <= 0) {
+                                            continue
+                                        }
+                                        For , key in command.SBL[key] {
+                                            index++
+                                            paramInfo := paramOrder[command.SCM.ParamOrder[index]]
+                                            if (paramInfo.ValueType == eVALUETYPE.Invalid) { ; invalid type
+                                                if printWarnings {
+                                                    warning .= "InvalidParameter: param=" paramInfo.Value " line=" . lineCount . " text=<<<" textLine ">>>`n"
+                                                }
+                                                if highlightText {
+                                                    parsedLineStatus := 2 ; highlight as error encountered during syntax replacement CFI = 2
+                                                }
+                                            }
+                                            if !key.Has("type")
+                                            or (paramInfo.ValueType == eVALUETYPE.Literal) ; is literal string. Variable Type needs declaration. We also declare the variables with invalid types just for user awareness in the generated code
+                                            or RegExMatch(paramInfo.Value, "[SsVv]\$|@[SsVv]") { ; this passed value is a string variable
+                                                continue
+                                            }
+                                            if varMap.Has(paramInfo.IndirectValue) { ; last parameter has the highest declaration priority overwriting the old ones
+                                                varMap[paramInfo.IndirectValue].Name := paramInfo.Value
+                                                varMap[paramInfo.IndirectValue].DataType := key["type"]
+                                            } else {
+                                                varMap[paramInfo.IndirectValue] := {Name: paramInfo.Value, DataType: key["type"]}
+                                            }
+                                        }
+                                    }
+                                        ;
+                                        ; Enumerate our datatype declarations
+                                    if (command.SBL["num_params"] == 2) and (varMap.Count == 1) {
+                                        useOpcodeSyntax := true
+                                    } else {
+                                        useOpcodeSyntax := false
+                                        for , varInfo in varMap {
+                                            if (A_Index > 1) {
+                                                processedText .= ", "
+                                            }
+                                            processedText .= varInfo.Name . ":" . varInfo.DataType
+                                        }
+                                    }
+                                        ;
+                                    if (processedText != "") {
+                                        processedText := "var " . Trim(processedText,", `t")
+                                        if highlightText {
+                                            highlightedText := processedText
+                                        }
+                                        if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
+                                            ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
+                                            tmpr := matchedText[1] . matchedText[2]
+                                            convertedText .= tmpr . "`r`n"
+                                            lineCount++
+                                            textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
+                                            processedText := matchedText[1] . "`t" . processedText
+                                        } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
+                                            processedText := matchedText[1] . processedText
+                                        }
+                                        if highlightText {
+                                            ; highlight as var declaration (CFI = 3)
+                                            gHighlightedRegions[preferClassSyntax + 1][lineCount] := {Pos: InStr(processedText, highlightedText), Len: StrLen(highlightedText), CFI: (parsedLineStatus ? parsedLineStatus : 3)}
+                                        }
+                                        convertedText .= processedText . "`r`n"
                                         lineCount++
-                                        textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
-                                        processedText := matchedText[1] . "`t" . processedText
-                                    } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
-                                        processedText := matchedText[1] . processedText
+                                        processedText := ""
                                     }
-                                    if highlightText {
-                                        ; highlight as var declaration (CFI = 3)
-                                        gHighlightedRegions[preferClassSyntax + 1][lineCount] := {Pos: InStr(processedText, highlightedText), Len: StrLen(highlightedText), CFI: (parsedLineStatus ? parsedLineStatus : 3)}
-                                    }
-                                    convertedText .= processedText . "`r`n"
-                                    lineCount++
-                                    processedText := ""
                                 }
-                            }
-                            ; adding opcode at the beginning for operator commands still the alternative convention: outputs first, inputs last
-                            ; so it doesn't actually matter if we put opcode at the beginning or not, cuz the arrangement are the same
-                            switch (command.SBL["num_params"]) {
-                                case 1:
-                                    processedText := command.SBL["operator"] . paramOrder[1].Value
-                                case 2:
-                                    if (command.SBL.Has("output") and (command.SBL["output"].Length == 1)) { ; use input first output last ordering
-                                        processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
-                                                       . paramOrder[command.SCM.ParamOrder[2]].Value
-                                                       . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
-                                                       . paramOrder[command.SCM.ParamOrder[1]].Value
-                                    } else { ; 2 outputs or 2 inputs, therefore we don't need to reorder the parameters
-                                        processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
-                                                       . paramOrder[command.SCM.ParamOrder[1]].Value
-                                                       . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
-                                                       . paramOrder[command.SCM.ParamOrder[2]].Value
-                                    }
-                                case 3:
-                                    processedText := paramOrder[command.SCM.ParamOrder[3]].Value
-                                                   . " = "
-                                                   . paramOrder[command.SCM.ParamOrder[1]].Value
-                                                   . " " . command.SBL["operator"] . " "
-                                                   . paramOrder[command.SCM.ParamOrder[2]].Value
-                            }
-                        } else { ; normal parsing
-                            isClassValid := (preferClassSyntax and command.SBL.Has("class") and command.SBL.Has("member"))
+                                ; adding opcode at the beginning for operator commands still the alternative convention: outputs first, inputs last
+                                ; so it doesn't actually matter if we put opcode at the beginning or not, cuz the arrangement are the same
+                                switch (command.SBL["num_params"]) {
+                                    case 1:
+                                        processedText := command.SBL["operator"] . paramOrder[1].Value
+                                    case 2:
+                                        if (command.SBL.Has("output") and (command.SBL["output"].Length == 1)) { ; use input first output last ordering
+                                            processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
+                                                        . paramOrder[command.SCM.ParamOrder[2]].Value
+                                                        . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
+                                                        . paramOrder[command.SCM.ParamOrder[1]].Value
+                                        } else { ; 2 outputs or 2 inputs, therefore we don't need to reorder the parameters
+                                            processedText := (useOpcodeSyntax ? (command.SBL["id"] . ": ") : "")
+                                                        . paramOrder[command.SCM.ParamOrder[1]].Value
+                                                        . " " . command.SBL["operator"] . (InStr(command.SBL["operator"],"=")?"":"=") . " "
+                                                        . paramOrder[command.SCM.ParamOrder[2]].Value
+                                        }
+                                    case 3:
+                                        processedText := paramOrder[command.SCM.ParamOrder[3]].Value
+                                                    . " = "
+                                                    . paramOrder[command.SCM.ParamOrder[1]].Value
+                                                    . " " . command.SBL["operator"] . " "
+                                                    . paramOrder[command.SCM.ParamOrder[2]].Value
+                                }
+                            } else { ; normal parsing
+                                isClassValid := (preferClassSyntax and command.SBL.Has("class") and command.SBL.Has("member"))
 
-                            if isClassValid {
-                                processedText := command.SBL["class"] . "." . command.SBL["member"] . "("
-                            } else {
-                                processedText := StrLower(command.SBL["name"])
-                            }
-                            index := 0
-                            if command.SBL.Has("input") and (command.SBL["input"].Length >= 1) {
-                                Loop ((command.ParseType == ePARAMSPARSETYPE.InputArgument) ? paramOrder.Length : command.SBL["input"].Length) {
-                                    index++
-                                    if !isClassValid {
-                                        processedText .= ((
-                                            command.SBL["input"].Has(A_Index) and command.SBL["input"][A_Index].Has("name")
-                                            and (Trim(command.SBL["input"][A_Index]["name"]) != ""))
-                                            ? (" {" . command.SBL["input"][A_Index]["name"] . "} ")
-                                            : " ")
-                                    } else if (A_Index != 1) {
-                                        processedText .= ", "
-                                    }
-                                    processedText .= paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                if isClassValid {
+                                    processedText := command.SBL["class"] . "." . command.SBL["member"] . "("
+                                } else {
+                                    processedText := StrLower(command.SBL["name"])
                                 }
-                            }
-
-                            if (command.ParseType != ePARAMSPARSETYPE.InputArgument)
-                            and command.SBL.Has("output") and (command.SBL["output"].Length >= 1) {
-                                iterations := ((command.ParseType == ePARAMSPARSETYPE.OutputArgument) ? (paramOrder.Length - (command.SBL.Has("input") ? command.SBL["input"].Length : 0)) : command.SBL["output"].Length)
-                                    ; check if user passed a literal value as output param
-                                loopIndex := index
-                                paramHasLiteralValue := false
-                                Loop iterations {
-                                    loopIndex++
-                                    if paramOrder[(loopIndex <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[loopIndex] : loopIndex].ValueType {
-                                        paramHasLiteralValue := true
-                                        break
-                                    }
-                                }
-                                    ;
-                                if paramHasLiteralValue {
-                                    Loop iterations {
+                                index := 0
+                                if command.SBL.Has("input") and (command.SBL["input"].Length >= 1) {
+                                    Loop ((command.ParseType == ePARAMSPARSETYPE.InputArgument) ? paramOrder.Length : command.SBL["input"].Length) {
                                         index++
                                         if !isClassValid {
                                             processedText .= ((
@@ -1280,42 +1263,74 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                                                 and (Trim(command.SBL["input"][A_Index]["name"]) != ""))
                                                 ? (" {" . command.SBL["input"][A_Index]["name"] . "} ")
                                                 : " ")
-                                        } else if (A_Index != 1) or (command.SBL.Has("input") and (command.SBL["input"].Length >= 1)) { ; has input param specified
+                                        } else if (A_Index != 1) {
                                             processedText .= ", "
                                         }
                                         processedText .= paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
                                     }
-                                } else {
-                                    outputText := ""
+                                }
+
+                                if (command.ParseType != ePARAMSPARSETYPE.InputArgument)
+                                and command.SBL.Has("output") and (command.SBL["output"].Length >= 1) {
+                                    iterations := ((command.ParseType == ePARAMSPARSETYPE.OutputArgument) ? (paramOrder.Length - (command.SBL.Has("input") ? command.SBL["input"].Length : 0)) : command.SBL["output"].Length)
+                                        ; check if user passed a literal value as output param
+                                    loopIndex := index
+                                    paramHasLiteralValue := false
                                     Loop iterations {
-                                        index++
-                                        outputText .= ((A_Index == 1)?"":", ")
-                                            . paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                        loopIndex++
+                                        if paramOrder[(loopIndex <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[loopIndex] : loopIndex].ValueType {
+                                            paramHasLiteralValue := true
+                                            break
+                                        }
                                     }
-                                    processedText := outputText . " = " . processedText
+                                        ;
+                                    if paramHasLiteralValue {
+                                        Loop iterations {
+                                            index++
+                                            if !isClassValid {
+                                                processedText .= ((
+                                                    command.SBL["input"].Has(A_Index) and command.SBL["input"][A_Index].Has("name")
+                                                    and (Trim(command.SBL["input"][A_Index]["name"]) != ""))
+                                                    ? (" {" . command.SBL["input"][A_Index]["name"] . "} ")
+                                                    : " ")
+                                            } else if (A_Index != 1) or (command.SBL.Has("input") and (command.SBL["input"].Length >= 1)) { ; has input param specified
+                                                processedText .= ", "
+                                            }
+                                            processedText .= paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                        }
+                                    } else {
+                                        outputText := ""
+                                        Loop iterations {
+                                            index++
+                                            outputText .= ((A_Index == 1)?"":", ")
+                                                . paramOrder[(index <= command.SCM.ParamOrder.Count) ? command.SCM.ParamOrder[index] : index].Value
+                                        }
+                                        processedText := outputText . " = " . processedText
+                                    }
+                                }
+
+                                if isClassValid {
+                                    processedText .= ")"
+                                }
+
+                                if command.IsLogicNot {
+                                    processedText := "not " . processedText
                                 }
                             }
-
-                            if isClassValid {
-                                processedText .= ")"
-                            }
-
-                            if command.IsLogicNot {
-                                processedText := "not " . processedText
-                            }
-                        }
-                            ;
-                        textLine := StrReplace(textLine, fromText, processedText)
-                        if highlightText {
-                            highlightedText := processedText
-                            if !parsedLineStatus { ; is unhighlighted
-                                parsedLineStatus := 1 ; highlight as succesful syntax replacement CFI = 1
+                                ;
+                            textLine := StrReplace(textLine, fromText, processedText)
+                            if highlightText {
+                                highlightedText := processedText
+                                if !parsedLineStatus { ; is unhighlighted
+                                    parsedLineStatus := 1 ; highlight as succesful syntax replacement CFI = 1
+                                }
                             }
                         }
                     }
                 }
             }
         }
+            ;
         if highlightText and parsedLineStatus {
             ; highlight as var declaration (CFI = 3)
             gHighlightedRegions[preferClassSyntax + 1][lineCount] := {Pos: InStr(textLine, highlightedText), Len: StrLen(highlightedText), CFI: parsedLineStatus}
