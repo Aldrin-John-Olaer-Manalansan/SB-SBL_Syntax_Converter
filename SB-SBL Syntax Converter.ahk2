@@ -3,7 +3,7 @@
  * @Author: Aldrin John O. Manalansan (ajom)
  * @Email: aldrinjohnolaermanalansan@gmail.com
  * @Brief: Convert Source Codes from Legacy SB Syntax into SBL Syntax
- * @Last Update: June 2, 2025
+ * @Last Update: August 13, 2025
  */
 
 #Requires AutoHotkey v2
@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 3 }
+AppVersion := { Major: 1, Minor: 3, Patch: 4 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -1008,7 +1008,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
         declarationsMap[key] := predefinedDeclarations[DEFINITIONDELIMITER][key]
     }
 
-    isMultilineComment := false
+    isMultilineComment := 0
     parseMode := ePARSEMODE.Command
     while !fileReader.AtEOF {
         if highlightText {
@@ -1025,15 +1025,20 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
             ;
             ; Process MultiLine Comments
         if isMultilineComment {
-            if InStr(fromText, "*/") {
-                isMultilineComment := false ; multiline comment ends here
-                ; remove the remnants of the remaining part of the multiline comment
-                fromText := RegExReplace(fromText, ".*?\*\/")
+            if (isMultilineComment == 1) and InStr(fromText, "*/") {
+                isMultilineComment := 0 ; multiline comment ends here
+                fromText := RegExReplace(fromText, ".*?\*\/") ; remove the remnants of the remaining part of the multiline comment
+            } else if (isMultilineComment == 2) and InStr(fromText, "}") {
+                isMultilineComment := 0 ; multiline comment ends here
+                fromText := RegExReplace(fromText, ".*?}") ; remove the remnants of the remaining part of the multiline comment
             }
         } else {
             if (pos := InStr(fromText, "/*", true, -1)) and !InStr(fromText, "*/", true, pos + 2) {
-                isMultilineComment := true
+                isMultilineComment := 1
                 fromText := RegExReplace(fromText, "\/\*.*")
+            } else if (pos := InStr(fromText, "{", true, -1)) and !InStr(fromText, "}", true, pos + 2) {
+                isMultilineComment := 2
+                fromText := RegExReplace(fromText, "{.*")
             }
             
             if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
