@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 4 }
+AppVersion := { Major: 1, Minor: 3, Patch: 5 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -65,7 +65,7 @@ REGEXAVOIDBODYCOMMENTS     := "(?:[ \t]*(?:" . REGEXBOUNDEDCOMMENT . "))*"
 REGEXIGNOREINICOMMENTS := "^[ \t]*[^;#\/]*[ \t]*"
 REGEXLEFTHANDSIDE := "^(\w+?)[ \t]*="
 REGEX_PARSE_EQUALITY := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
-REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT := "(\w+)[ \t]*=[ \t]*([\w@$(),\[\]]+)[ \t]*(?:,|$)"
+REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT := "(\w+)[ \t]*=[ \t]*([\w@$().\[\]]+)[ \t]*(?:,|$)"
 REGEX_PARSE_INLINEDDECLARATIONS_AUTOASSIGNEDVARIABLE := "(\w+[ \t]*=[ \t]*[\w@$(),\[\]]+)[ \t]*(?:,|$)"
 REGEX_PARSE_MULTICONST := "i)^const[ \t]+(.*)$"
 REGEXENUMNAME := "i)^enum[ \t]+(.+)$"
@@ -1099,11 +1099,11 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                             ; create array of params found at processedText
                         paramOrder := Array()
                         pos := 1
-                        while RegExMatch(processedText, "(?:^|[\t ]+)('.+?'|\`".+?\`"|.+?)(?:[\t ]+|$)", &matchedText, pos) { ; match every space separated terms
+                        while RegExMatch(processedText, "((?:'.+?')|(?:\`".+?\`")|(?:[^\s]+))", &matchedText, pos) { ; match every space separated terms
                             pos := matchedText.Pos(1) + matchedText.Len(1)
 
                             term := matchedText[1]
-                            if (SubStr(term, matchedText.Len(1)) == ":") {
+                            if InStr(term, ":") {
                                 continue ; do nothing if its an opcode
                             } else if RegExMatch(term, REGEXVARARRAY) {
                                 paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Variable}) ; add var to list of params
