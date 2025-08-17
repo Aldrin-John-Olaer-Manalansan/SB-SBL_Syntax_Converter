@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 3, Patch: 5 }
+AppVersion := { Major: 1, Minor: 4, Patch: 0 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -57,15 +57,19 @@ eWARNINGCODES := Map(
     "DuplicateDefinitions", "two or more duplicate definitions of the subject was detected. Used by Developers to detect problems."
 )
 
-REGEXBOUNDEDCOMMENT := "{.*?}|\/\*.*?\*\/"
-REGEXALLCOMMENTS := REGEXBOUNDEDCOMMENT . "|\/{2}.*"
-REGEXCOMMENTSANDSPACES := "(?:[ \t]*(?:" . REGEXALLCOMMENTS . "))*[ \t]*"
-REGEXAVOIDBODYCOMMENTS     := "(?:[ \t]*(?:" . REGEXBOUNDEDCOMMENT . "))*"
-;REGEXENDOFWORD := "(?:[ \t]|$)"
+REGEX_LITERALSTRING_DOUBLEQUOTE := "`"(:?.*?(?:\\`")?)*`""
+REGEX_LITERALSTRING_SINGLEQUOTE := "'(:?.*?(?:\\')?)*'"
+REGEX_INLINECOMMENT_CURLYBRACE := "{(?:[^$].+?)?}"
+REGEX_INLINECOMMENT_DASHSTAR := "\/\*.*?\*\/"
+REGEX_ALLINLINECOMMENTS := "(?:" . REGEX_LITERALSTRING_DOUBLEQUOTE . "|" . REGEX_LITERALSTRING_SINGLEQUOTE . ")(*SKIP)(*F)|" . REGEX_INLINECOMMENT_CURLYBRACE . "|" . REGEX_INLINECOMMENT_DASHSTAR . "|\/\/.*"
+REGEX_RIGHTHANDCOMMENT := "(?:" REGEX_LITERALSTRING_DOUBLEQUOTE . "|" . REGEX_LITERALSTRING_SINGLEQUOTE "|{[^{}]*}|" . REGEX_INLINECOMMENT_DASHSTAR . ")(*SKIP)(*F)|\/\/.*"
+REGEX_INLINECOMMENTS_BEGINNING := "^(?:[\t ]*(?:" . REGEX_INLINECOMMENT_CURLYBRACE . "|" . REGEX_INLINECOMMENT_DASHSTAR . "))+[\t ]*"
+
+REGEXCOMMENTSANDSPACES := "(?:[ \t]*(?:" . REGEX_ALLINLINECOMMENTS . "))*[ \t]*"
 REGEXIGNOREINICOMMENTS := "^[ \t]*[^;#\/]*[ \t]*"
 REGEXLEFTHANDSIDE := "^(\w+?)[ \t]*="
 REGEX_PARSE_EQUALITY := REGEXLEFTHANDSIDE . "[ \t]*(.+?)[ \t]*$"
-REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT := "(\w+)[ \t]*=[ \t]*([\w@$().\[\]]+)[ \t]*(?:,|$)"
+REGEX_PARSE_INLINEDDECLARATIONS_CONSTANT := "(\w+)[ \t]*=[ \t]*([\w@$()\-+.\[\]]+)[ \t]*(?:,|$)"
 REGEX_PARSE_INLINEDDECLARATIONS_AUTOASSIGNEDVARIABLE := "(\w+[ \t]*=[ \t]*[\w@$(),\[\]]+)[ \t]*(?:,|$)"
 REGEX_PARSE_MULTICONST := "i)^const[ \t]+(.*)$"
 REGEXENUMNAME := "i)^enum[ \t]+(.+)$"
@@ -127,6 +131,7 @@ if useRichEdit {
 Gui_ControlPanel.AddButton("X+m H20", "Save Converted Source Code").OnEvent("Click", SaveConvertedText)
 Gui_ControlPanel.AddButton("X30 Y+10 H20 vBrowseSC", "Browse Source Code").OnEvent("Click", BrowseSourceCode)
 Gui_ControlPanel.AddEdit("X+m W480 H20 vTargetPath ReadOnly Background" . EDITCTRLBACKGROUND)
+Gui_ControlPanel.AddProgress("X30 Y+10 W1130 H20 vConversionProgress", 0)
 if !useRichEdit { ; msftedit.dll is not loaded
     Gui_ControlPanel.AddEdit("X30 Y+10 W1130 H200 vConvertedText ReadOnly Background" . EDITCTRLBACKGROUND) ; create classic edit control
 } else {
@@ -167,8 +172,8 @@ Gui_ControlPanel.SetFont("s" . GUIFONTSIZE . " bold")
 Gui_ControlPanel.AddText("X200 Y+10 vConstEnumText_x", "Constants/Enums Files")
 Gui_ControlPanel.AddText("X+460 vKeywordsText_x", "Keywords Files")
 Gui_ControlPanel.SetFont("norm")
-Gui_ControlPanel.AddEdit("X30 Y+10 W560 H125 vConstantsEnumsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
-Gui_ControlPanel.AddEdit("X+10 W560 H125 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+Gui_ControlPanel.AddEdit("X30 Y+10 W560 H155 vConstantsEnumsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.ConstantsEnumsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
+Gui_ControlPanel.AddEdit("X+10 W560 H155 vKeywordsFilePaths Background" . EDITCTRLBACKGROUND, gSettings.KeywordsFilePaths[Gui_ControlPanel["ConfigurationGameType"].Text]).OnEvent("LoseFocus", SaveDefinitionSettingToIni)
 
 Gui_ControlPanel["Tabs"].UseTab()  ; Add Controls Outside the Tab
 Gui_ControlPanel.AddButton("X545 Y5 W100 H15 vVisitIssues", "Visit Issues Page").OnEvent("Click", (*) => run("https://github.com/Aldrin-John-Olaer-Manalansan/SB-SBL_Syntax_Converter/issues"))
@@ -345,6 +350,7 @@ Gui_ControlPanel_Resize(GuiObj, MinMax, Width, Height) {
 	AutoXYWH("w", Gui_ControlPanel["SBDir"])
 	AutoXYWH("x", Gui_ControlPanel["UseClassicEdit"])
 	AutoXYWH("w", Gui_ControlPanel["Warnings"])
+	AutoXYWH("w", Gui_ControlPanel["ConversionProgress"])
 	AutoXYWH("wh", Gui_ControlPanel["ConvertedText"])
 	AutoXYWH("x0.25", Gui_ControlPanel["ConstEnumText_x"])
 	AutoXYWH("x0.75", Gui_ControlPanel["KeywordsText_x"])
@@ -361,6 +367,12 @@ Gui_ControlPanel_Closed(*) {
 ; #endregion ~~~~~~~~~~~~~~~~ Events Handlers ~~~~~~~~~~~~~~~~
 
 ; #region ~~~~~~~~~~~~~~~~ SNIPPETS / FUNCTIONS ~~~~~~~~~~~~~~
+StringReverse(str)
+{
+    static MulDivProc := DllCall("GetProcAddress", "Ptr", DllCall("GetModuleHandle", "Str", "msvcrt", "Ptr"), "AStr", "_wcsrev", "Ptr")
+    DllCall(MulDivProc, "Str", str, "Cdecl")
+    return str
+}
 
 PreloadConvertedText(sourceCodePath) {
     checker := FileExist(sourceCodePath)
@@ -464,6 +476,7 @@ GUIProcessSourceCode(sourceCodePath) {
         ; reenable operation buttons
     Gui_ControlPanel["UseClass"].Enabled := true
     Gui_ControlPanel["BrowseSC"].Enabled := true
+    Gui_ControlPanel["ConversionProgress"].Value := 0
 }
 
 CLIProcessSourceCode(inputSourceCode, sannyBuilderDirectory, targetGame, useClass := "", outputSourceCode := "", unused*) {
@@ -801,9 +814,6 @@ ProcessParamsParseType(extension, opcode, params, isLogicNot) {
     } else if (params.Length == sblCommand["num_params"]) {
         return {ParseType: ePARAMSPARSETYPE.Normal, IsLogicNot: isLogicNot, SCM: scmCommand, SBL: sblCommand}
     }
-    if (opcode == 0x0AB9) {
-        val := true
-    }
 }
 
 GetParamsParseType(usedExtensions, opcode, params) {
@@ -952,7 +962,7 @@ UpdatePredefinedDeclarations(predefinedDeclarations, filePath, workPath, require
 
     parseMode := ePARSEMODE.Command
     while !fileObj.AtEOF {
-        textLine := Trim(RegExReplace(fileObj.ReadLine(), REGEXALLCOMMENTS)) ; remove all comments then remove leading and trailing whitespaces
+        textLine := Trim(RegExReplace(fileObj.ReadLine(), REGEX_ALLINLINECOMMENTS)) ; remove all comments then remove leading and trailing whitespaces
         if (textLine == "") {
             continue
         } else if parseMode and (textLine = "end") {
@@ -986,8 +996,21 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
     catch {
         return ""
     }
+    
+        ; detect how many lines the code has
+    value := 0
+    while !fileReader.AtEOF {
+        fileReader.ReadLine()
+        value++
+    }
+    fileReader.Pos := 0 ; reset position to beginning
+    if IsSet(Gui_ControlPanel) {
+        ; Setup ProgressBar
+        Gui_ControlPanel["ConversionProgress"].Opt("Range0-" . value)
+        Gui_ControlPanel["ConversionProgress"].Value := 0
+    }
+        ;
 
-    REGEXCOMMANDSTARTINGBARRIER := "^(?:[ \t]*(?:if|then|else|while|until|" . REGEXALLCOMMENTS . "))*[ \t]*"
     if highlightText {
         gHighlightedRegions[preferClassSyntax + 1] := Map()
     }
@@ -1014,6 +1037,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
         if highlightText {
             parsedLineStatus := 0 ; initialize as no highlighting CFI = 0
         }
+
         textLine := fileReader.ReadLine()
             ; replace breaking changes into their sb4 counterpart
         for , value in [["$player_actor", "$scplayer"], ["$player_char", "$player1"]] {
@@ -1021,30 +1045,40 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                 textLine := StrReplace(textLine, value[1], value[2])
             }
         }
-        fromText := RegExReplace(textLine, "\/{2}.*") ; remove // comments
-            ;
+            ; Remove Comments from Beginning and at the End
+        fromText := RegExReplace(textLine, REGEX_INLINECOMMENTS_BEGINNING)
+        fromText := RegExReplace(fromText, REGEX_RIGHTHANDCOMMENT)
+        fromText := StringReverse(fromText)
+        fromText := RegExReplace(fromText, REGEX_INLINECOMMENTS_BEGINNING)
+        fromText := StringReverse(fromText)
+        fromText := RegExReplace(fromText, "i)^(?:[ \t]*(?:if(?:[ \t]*(?:and|or))?|then|else|while|until))+[ \t]*") ; remove conditional/looping statements
+
             ; Process MultiLine Comments
         if isMultilineComment {
-            if (isMultilineComment == 1) and InStr(fromText, "*/") {
+            if (isMultilineComment == 1) and (pos := InStr(fromText, "*/")) {
                 isMultilineComment := 0 ; multiline comment ends here
-                fromText := RegExReplace(fromText, ".*?\*\/") ; remove the remnants of the remaining part of the multiline comment
-            } else if (isMultilineComment == 2) and InStr(fromText, "}") {
+                fromText := SubStr(fromText, pos + 2) ; remove the remnants of the remaining part of the multiline comment
+            } else if (isMultilineComment == 2) and (pos := InStr(fromText, "}")) {
                 isMultilineComment := 0 ; multiline comment ends here
-                fromText := RegExReplace(fromText, ".*?}") ; remove the remnants of the remaining part of the multiline comment
+                fromText := SubStr(fromText, pos + 1) ; remove the remnants of the remaining part of the multiline comment
             }
-        } else {
-            if (pos := InStr(fromText, "/*", true, -1)) and !InStr(fromText, "*/", true, pos + 2) {
+        }
+        if !isMultilineComment {
+            if (pos := InStr(fromText, "/*", true,, -1)) and !InStr(fromText, "*/", true, pos) {
                 isMultilineComment := 1
-                fromText := RegExReplace(fromText, "\/\*.*")
-            } else if (pos := InStr(fromText, "{", true, -1)) and !InStr(fromText, "}", true, pos + 2) {
+                fromText := SubStr(fromText, 1, pos - 1)
+            } else if (pos := InStr(fromText, "{", true,, -1)) and !InStr(fromText, "}", true, pos) {
                 isMultilineComment := 2
-                fromText := RegExReplace(fromText, "{.*")
+                fromText := SubStr(fromText, 1, pos - 1)
             }
             
-            if InStr(fromText, "{$CLEO") { ; encountered $CLEO directive
+            fromText := Trim(fromText) ; make sure that fromText has no leading/trailing spaces
+            processedText := Trim(RegExReplace(fromText, REGEX_ALLINLINECOMMENTS)) ; remove bounded comments in between params
+            
+            if InStr(processedText, "{$CLEO") { ; encountered $CLEO directive
                 usedExtensions["default"] := true
                 usedExtensions["cleo"] := true
-            } else if RegExMatch(fromText, "i){[\t ]*\$(USE|I(?:NCLUDE(?:_ONCE)*)*)[\t ]+(.+?)[\t ]*}", &matchedText) { ; encountered $USE directive
+            } else if RegExMatch(processedText, "i){[\t ]*\$(USE|I(?:NCLUDE(?:_ONCE)*)*)[\t ]+(.+?)[\t ]*}", &matchedText) { ; encountered $USE directive
                 For key in StrSplit(matchedText[2], ",", " `t") {
                     key := StrLower(key)
                     if (matchedText[1] = "USE") { ; case insensistive
@@ -1057,15 +1091,8 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                         }
                     }
                 }
-            } else if RegExMatch(
-                ; remove control-flow commands(if, then, else, while, etc...) to prevent evaluating them as a command
-                RegExReplace(fromText, "i)" . REGEXCOMMANDSTARTINGBARRIER),
-                "(.+?)" . REGEXCOMMENTSANDSPACES . "$",
-                &fromText
-            ) {
+            } else {
                 ; textLine is suspected as a command (case insensitive)
-                fromText := Trim(fromText[1])
-                processedText := Trim(RegExReplace(fromText, REGEXBOUNDEDCOMMENT)) ; remove bounded comments in between params
                 switch (parseMode) {
                 Case ePARSEMODE.ConstField: ; Const ... End
                     if (processedText = "end") {
@@ -1099,11 +1126,11 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                             ; create array of params found at processedText
                         paramOrder := Array()
                         pos := 1
-                        while RegExMatch(processedText, "((?:'.+?')|(?:\`".+?\`")|(?:[^\s]+))", &matchedText, pos) { ; match every space separated terms
-                            pos := matchedText.Pos(1) + matchedText.Len(1)
+                        while RegExMatch(processedText, "(?:'.*?')|(?:\`".*?\`")|(?:[^\s]+)", &matchedText, pos) { ; match every space separated terms
+                            pos := matchedText.Pos(0) + matchedText.Len(0)
+                            term := matchedText[0]
 
-                            term := matchedText[1]
-                            if InStr(term, ":") {
+                            if RegExMatch(term, "[[:xdigit:]]{4}:") {
                                 continue ; do nothing if its an opcode
                             } else if RegExMatch(term, REGEXVARARRAY) {
                                 paramOrder.Push({Value: term, IndirectValue: term, ValueType: eVALUETYPE.Variable}) ; add var to list of params
@@ -1342,6 +1369,9 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
         }
         convertedText .= textLine . "`r`n"
         lineCount++
+        if IsSet(Gui_ControlPanel) {
+            Gui_ControlPanel["ConversionProgress"].Value++ ; update progressbar
+        }
     }
     
     if printWarnings and warning and IsSet(Gui_ControlPanel) {
