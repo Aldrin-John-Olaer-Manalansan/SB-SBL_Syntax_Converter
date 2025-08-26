@@ -18,7 +18,7 @@ SetWorkingDir A_ScriptDir ; Ensures a consistent starting directory
 ; #region ~~~~~~~~~~~~~~~~~~~ INITIALIZATION ~~~~~~~~~~~~~~~~~
 
 ; #region Constants
-AppVersion := { Major: 1, Minor: 4, Patch: 0 }
+AppVersion := { Major: 1, Minor: 4, Patch: 1 }
 AppName := "AJOM's SB->SBL Syntax Converter"
 Gui_ControlPanel_DefaultTitle := AppName . " v" . AppVersion.Major . "." AppVersion.Minor . "." AppVersion.Patch . (A_IsAdmin?" (Administrator)":"")
 INIPATH := A_ScriptDir . "\" . "Settings.ini"
@@ -1045,6 +1045,7 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                 textLine := StrReplace(textLine, value[1], value[2])
             }
         }
+        textLine := RegExReplace(textLine, "i)(^[ \t]*)00D6:[ \t]*(.*)", "$1$2")
             ; Remove Comments from Beginning and at the End
         fromText := RegExReplace(textLine, REGEX_INLINECOMMENTS_BEGINNING)
         fromText := RegExReplace(fromText, REGEX_RIGHTHANDCOMMENT)
@@ -1234,13 +1235,12 @@ ConvertSBToSBL(inputFile, targetGame, preferClassSyntax := false, printWarnings 
                                         if highlightText {
                                             highlightedText := processedText
                                         }
-                                        if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")((?:then|else)" . REGEXCOMMENTSANDSPACES . ")", &matchedText) {
+                                        if RegExMatch(textLine, "i)^(" . REGEXCOMMENTSANDSPACES . ")(?:then|else)[ \t]*(?:if|while|repeat)?[ \t]*", &matchedText) {
                                             ; command is found at the "then" or "else" statement (case insensitive), then we isolate the command
-                                            tmpr := matchedText[1] . matchedText[2]
-                                            convertedText .= tmpr . "`r`n"
+                                            convertedText .= matchedText[0] . "`r`n"
                                             lineCount++
-                                            textLine := StrReplace(textLine, tmpr, matchedText[1] . "`t")
-                                            processedText := matchedText[1] . "`t" . processedText
+                                            textLine := StrReplace(textLine, matchedText[0], matchedText[1] . "`t") ; remove then/else then indent once
+                                            processedText := matchedText[1] . "`t" . processedText ; indent the var declaration
                                         } else if RegExMatch(textLine, "^([ \t]+)", &matchedText) { ; append var declaration with indentation
                                             processedText := matchedText[1] . processedText
                                         }
